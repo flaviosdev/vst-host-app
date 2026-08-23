@@ -1,0 +1,10 @@
+^C:\PROJETOS\DEV\VSTHOSTAPP\BUILD\CMAKEFILES\018C66483AF6EE0E12ACD29804FB2320\GENERATE.STAMP.RULE
+setlocal
+C:\bin\cmake-4.1.2-windows-x86_64\bin\cmake.exe -SC:/Projetos/Dev/VSTHostApp -BC:/Projetos/Dev/VSTHostApp/build --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file C:/Projetos/Dev/VSTHostApp/build/VSTHostApp.sln
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

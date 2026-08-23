@@ -1,0 +1,10 @@
+^C:\PROJETOS\DEV\VSTHOSTAPP\CMAKELISTS.TXT
+setlocal
+C:\bin\cmake-4.1.2-windows-x86_64\bin\cmake.exe -SC:/Projetos/Dev/VSTHostApp -BC:/Projetos/Dev/VSTHostApp/build --check-stamp-file C:/Projetos/Dev/VSTHostApp/build/CMakeFiles/generate.stamp
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

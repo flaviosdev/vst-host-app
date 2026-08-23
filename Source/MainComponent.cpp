@@ -194,10 +194,14 @@ void MainComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
 //==============================================================================
 void MainComponent::loadPlugin()
 {
+    // Aceita tanto .vst3 (plugins modernos, empacotados como pasta/bundle)
+    // quanto .dll (plugins VST2 legados, arquivo solto). O código abaixo
+    // já detecta automaticamente qual formato é qual - não precisa de
+    // nenhuma escolha manual do usuário.
     auto chooser = std::make_shared<juce::FileChooser>(
-        "Selecione um plugin VST3",
+        "Selecione um plugin VST2 (.dll) ou VST3 (.vst3)",
         juce::File::getSpecialLocation(juce::File::globalApplicationsDirectory),
-        "*.vst3");
+        "*.vst3;*.dll");
 
     auto flags = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles;
 

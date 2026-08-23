@@ -54,7 +54,7 @@ private:
 
     //== UI ====================================================================
     juce::TextButton audioSettingsButton   { "Configuracoes de Audio/MIDI..." };
-    juce::TextButton loadPluginButton      { "Carregar Plugin VST3..." };
+    juce::TextButton loadPluginButton      { "Carregar Plugin (VST2/VST3)..." };
     juce::TextButton showEditorButton      { "Abrir Interface do Plugin" };
     juce::Label      pluginNameLabel;
     juce::Label      statusLabel;
