@@ -1,0 +1,67 @@
+# ============================================================
+# Pastas de build geradas pelo CMake / Visual Studio
+# ============================================================
+build/
+build-*/
+out/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+*.dir/
+
+# ============================================================
+# Visual Studio
+# ============================================================
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.suo
+*.user
+*.userosscache
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.VC.opendb
+
+# ============================================================
+# JUCE (a pasta é grande e não deve ser versionada aqui;
+# cada dev clona a versão certa localmente, conforme o README)
+# ============================================================
+JUCE/
+
+# ============================================================
+# SDKs de terceiros (Steinberg ASIO SDK, VST2 SDK, etc.)
+# NUNCA versionar: são de terceiros, licenciados separadamente,
+# e alguns (como o VST2 SDK) têm distribuição descontinuada pela
+# Steinberg - cada dev deve obter a sua própria cópia.
+# ============================================================
+libs/
+*.sdk/
+
+# ============================================================
+# Artefatos de compilação (executáveis, libs, objetos)
+# ============================================================
+*.exe
+*.dll
+*.lib
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.log
+
+# ============================================================
+# Presets de usuário salvos localmente durante testes
+# (não fazem parte do código-fonte do projeto)
+# ============================================================
+Presets/
+
+# ============================================================
+# Arquivos de sistema operacional
+# ============================================================
+Thumbs.db
+Desktop.ini
+.DS_Store
