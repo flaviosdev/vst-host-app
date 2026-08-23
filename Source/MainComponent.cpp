@@ -9,11 +9,12 @@ MainComponent::MainComponent()
     formatManager.addDefaultFormats();
 
     // ------------------------------------------------------------------
-    // Inicializa o gerenciador de áudio. Sem entradas de áudio por padrão
-    // (não precisamos de entrada de áudio para tocar um VSTi), 2 saídas.
-    // O usuário escolhe o driver ASIO na tela de configurações.
+    // Inicializa o gerenciador de áudio, restaurando a última configuração
+    // salva (driver ASIO escolhido, dispositivos MIDI habilitados, etc.),
+    // se existir. Sem entradas de áudio por padrão, 2 saídas.
     // ------------------------------------------------------------------
-    deviceManager.initialiseWithDefaultDevices(0, 2);
+    auto savedAudioState = loadAudioDeviceState();
+    deviceManager.initialise(0, 2, savedAudioState.get(), true);
     deviceManager.addChangeListener(this);
 
     // Liga o "player" (que recebe áudio e MIDI e os envia ao plugin) ao
@@ -27,7 +28,7 @@ MainComponent::MainComponent()
     // UI
     // ------------------------------------------------------------------
     addAndMakeVisible(audioSettingsButton);
-    audioSettingsButton.onClick = [this] { showAudioSettings(); };
+    audioSettingsButton.onClick = [this] { showPreferences(); };
 
     addAndMakeVisible(loadPluginButton);
     loadPluginButton.onClick = [this] { loadPlugin(); };
@@ -79,6 +80,7 @@ MainComponent::~MainComponent()
 {
     deviceManager.removeChangeListener(this);
     unloadPlugin();
+    saveAudioDeviceState();
     deviceManager.removeAudioCallback(&audioProcessorPlayer);
     deviceManager.closeAudioDevice();
 }
@@ -140,27 +142,48 @@ void MainComponent::setStatus(const juce::String& message)
 //==============================================================================
 //  Áudio / MIDI
 //==============================================================================
-void MainComponent::showAudioSettings()
+void MainComponent::showPreferences()
 {
-    auto* selector = new juce::AudioDeviceSelectorComponent(
-        deviceManager,
-        0, 0,       // canais de entrada de áudio (min/max) - não usamos
-        0, 2,       // canais de saída de áudio (min/max)
-        true,       // mostrar seletor de entradas MIDI
-        false,      // mostrar seletor de saídas MIDI
-        true,       // mostrar pares de canais estéreo
-        false);     // esconder opções avançadas atrás de um botão
+    if (preferencesWindow != nullptr)
+    {
+        preferencesWindow->toFront(true);
+        return;
+    }
 
-    selector->setSize(500, 450);
+    preferencesWindow = std::make_unique<PreferencesWindow>(deviceManager);
+    preferencesWindow->onCloseRequested = [this]
+    {
+        saveAudioDeviceState(); // salva já ao fechar as preferências, não só ao sair do app
+        preferencesWindow.reset();
+    };
+}
 
-    juce::DialogWindow::LaunchOptions options;
-    options.content.setOwned(selector);
-    options.dialogTitle = "Configuracoes de Audio e MIDI";
-    options.dialogBackgroundColour = getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId);
-    options.escapeKeyTriggersCloseButton = true;
-    options.useNativeTitleBar = true;
-    options.resizable = false;
-    options.launchAsync();
+juce::File MainComponent::getSettingsFile() const
+{
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+               .getChildFile("VSTHostApp")
+               .getChildFile("AudioSettings.xml");
+}
+
+std::unique_ptr<juce::XmlElement> MainComponent::loadAudioDeviceState() const
+{
+    auto file = getSettingsFile();
+
+    if (!file.existsAsFile())
+        return nullptr;
+
+    return juce::XmlDocument::parse(file);
+}
+
+void MainComponent::saveAudioDeviceState()
+{
+    auto xml = deviceManager.createStateXml();
+    if (xml == nullptr)
+        return;
+
+    auto file = getSettingsFile();
+    file.getParentDirectory().createDirectory();
+    xml->writeTo(file);
 }
 
 void MainComponent::connectMidiInputs()

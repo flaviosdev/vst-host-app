@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "PreferencesWindow.h"
 #include "PresetManager.h"
 
 /**
@@ -24,12 +25,18 @@ private:
     //== Áudio / MIDI ==========================================================
     juce::AudioDeviceManager deviceManager;
     juce::AudioProcessorPlayer audioProcessorPlayer;
+    std::unique_ptr<PreferencesWindow> preferencesWindow;
 
-    void showAudioSettings();
+    void showPreferences();
     void connectMidiInputs();
     // Chamado pelo AudioDeviceManager quando a configuração muda
     // (ex.: usuário habilitou/desabilitou um dispositivo MIDI)
     void changeListenerCallback(juce::ChangeBroadcaster*) override;
+
+    // Persistência da configuração de áudio/MIDI em disco (%APPDATA%)
+    juce::File getSettingsFile() const;
+    std::unique_ptr<juce::XmlElement> loadAudioDeviceState() const;
+    void saveAudioDeviceState();
 
     //== Plugin VST3 ===========================================================
     juce::AudioPluginFormatManager formatManager;
@@ -53,7 +60,7 @@ private:
     void deleteSelectedPreset();
 
     //== UI ====================================================================
-    juce::TextButton audioSettingsButton   { "Configuracoes de Audio/MIDI..." };
+    juce::TextButton audioSettingsButton   { "Preferencias..." };
     juce::TextButton loadPluginButton      { "Carregar Plugin (VST2/VST3)..." };
     juce::TextButton showEditorButton      { "Abrir Interface do Plugin" };
     juce::Label      pluginNameLabel;

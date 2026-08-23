@@ -61,6 +61,7 @@ target_sources(VSTHostApp PRIVATE
     Source/Main.cpp
     Source/MainComponent.cpp
     Source/PresetManager.cpp
+    Source/PreferencesWindow.cpp
 )
 
 # Gera o arquivo JuceHeader.h (usado pelos #include <JuceHeader.h> no código)
