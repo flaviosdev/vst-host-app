@@ -37,6 +37,7 @@ public:
         // Chamado quando a configuração de áudio/MIDI muda (ex.: usuário
         // trocou o driver ASIO ou habilitou um dispositivo MIDI).
         virtual void audioDeviceChanged() {}
+        virtual void pluginsChanged() {}
     };
 
     PluginHostEngine();
@@ -64,6 +65,14 @@ public:
     // plugin encontrado e o conecta ao áudio/MIDI. Substitui o plugin
     // atualmente carregado, se houver.
     LoadResult loadPluginFromFile(const juce::File& file);
+
+    //== Plugins ===============================================================
+    juce::StringArray getPluginSearchPaths() const;
+    void addPluginSearchPath(const juce::File& directory);
+    void removePluginSearchPath(const juce::File& directory);
+    void scanPlugins(bool scanNewOnly);
+    juce::Array<juce::PluginDescription> getKnownPlugins() const;
+    LoadResult loadPlugin(const juce::PluginDescription& description);
 
     void unloadPlugin();
     bool hasPluginLoaded() const noexcept { return plugin != nullptr; }
@@ -94,12 +103,17 @@ private:
     void changeListenerCallback(juce::ChangeBroadcaster* source) override;
 
     juce::File getSettingsFile() const;
+    juce::File getPluginPathsFile() const;
+    juce::File getKnownPluginsFile() const;
+    void loadPluginSettings();
+    void savePluginSettings();
     std::unique_ptr<juce::XmlElement> loadAudioDeviceState() const;
 
     juce::AudioDeviceManager deviceManager;
     juce::AudioProcessorPlayer audioProcessorPlayer;
     juce::AudioPluginFormatManager formatManager;
     juce::KnownPluginList knownPluginList;
+    juce::StringArray pluginSearchPaths;
     std::unique_ptr<juce::AudioPluginInstance> plugin;
     PresetManager presetManager;
 

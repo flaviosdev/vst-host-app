@@ -84,9 +84,118 @@ void MidiSettingsComponent::resized()
 }
 
 //==============================================================================
+//  PluginSettingsComponent
+//==============================================================================
+class PluginPathListModel : public juce::ListBoxModel
+{
+public:
+    explicit PluginPathListModel(juce::StringArray& values) : paths(values) {}
+    int getNumRows() override { return paths.size(); }
+    void paintListBoxItem(int row, juce::Graphics& g, int width, int height, bool selected) override
+    {
+        if (selected) g.fillAll(juce::Colours::lightblue);
+        g.setColour(juce::Colours::white);
+        g.drawText(paths[row], 8, 0, width - 16, height, juce::Justification::centredLeft);
+    }
+private:
+    juce::StringArray& paths;
+};
+
+PluginSettingsComponent::PluginSettingsComponent(PluginHostEngine& engineToUse)
+    : engine(engineToUse)
+{
+    infoLabel.setText("Pastas onde o VST Host procura plugins VST2/VST3:", juce::dontSendNotification);
+    infoLabel.setJustificationType(juce::Justification::centredLeft);
+    addAndMakeVisible(infoLabel);
+
+    addAndMakeVisible(pathList);
+    pathModel = std::make_unique<PluginPathListModel>(paths);
+    pathList.setModel(pathModel.get());
+
+    addAndMakeVisible(addButton);
+    addButton.onClick = [this] { addPath(); };
+
+    addAndMakeVisible(removeButton);
+    removeButton.onClick = [this] { removePath(); };
+
+    addAndMakeVisible(scanButton);
+    scanButton.onClick = [this] { scan(false); };
+
+    addAndMakeVisible(scanNewButton);
+    scanNewButton.onClick = [this] { scan(true); };
+
+    refreshPaths();
+}
+
+void PluginSettingsComponent::refreshPaths()
+{
+    paths = engine.getPluginSearchPaths();
+    pathList.updateContent();
+    pathList.repaint();
+}
+
+void PluginSettingsComponent::addPath()
+{
+    fileChooser = std::make_unique<juce::FileChooser>(
+        "Selecione a pasta de plugins",
+        juce::File::getSpecialLocation(juce::File::userHomeDirectory),
+        "*",
+        false);
+
+    const auto flags = juce::FileBrowserComponent::openMode
+                     | juce::FileBrowserComponent::canSelectDirectories;
+
+    fileChooser->launchAsync(flags, [this](const juce::FileChooser& chooser)
+    {
+        const auto selectedDirectory = chooser.getResult();
+        if (selectedDirectory.isDirectory())
+        {
+            engine.addPluginSearchPath(selectedDirectory);
+            refreshPaths();
+        }
+
+        fileChooser.reset();
+    });
+}
+
+void PluginSettingsComponent::removePath()
+{
+    const auto row = pathList.getSelectedRow();
+    if (row >= 0 && row < paths.size())
+    {
+        engine.removePluginSearchPath(juce::File(paths[row]));
+        refreshPaths();
+    }
+}
+
+void PluginSettingsComponent::scan(bool newOnly)
+{
+    scanButton.setEnabled(false);
+    scanNewButton.setEnabled(false);
+    engine.scanPlugins(newOnly);
+    scanButton.setEnabled(true);
+    scanNewButton.setEnabled(true);
+}
+
+void PluginSettingsComponent::resized()
+{
+    auto area = getLocalBounds().reduced(16);
+    infoLabel.setBounds(area.removeFromTop(24));
+    area.removeFromTop(8);
+
+    auto buttons = area.removeFromBottom(32);
+    addButton.setBounds(buttons.removeFromLeft(100).reduced(2, 0));
+    removeButton.setBounds(buttons.removeFromLeft(100).reduced(2, 0));
+    scanButton.setBounds(buttons.removeFromLeft(90).reduced(2, 0));
+    scanNewButton.setBounds(buttons.removeFromLeft(100).reduced(2, 0));
+    area.removeFromBottom(8);
+    pathList.setBounds(area);
+}
+
+//==============================================================================
 //  PreferencesWindow
 //==============================================================================
-PreferencesWindow::PreferencesWindow(juce::AudioDeviceManager& deviceManagerToUse)
+PreferencesWindow::PreferencesWindow(PluginHostEngine& engineToUse)
     : DocumentWindow("Preferencias",
                       juce::Desktop::getInstance().getDefaultLookAndFeel()
                           .findColour(juce::ResizableWindow::backgroundColourId),
@@ -98,7 +207,7 @@ PreferencesWindow::PreferencesWindow(juce::AudioDeviceManager& deviceManagerToUs
     // Aba de Audio: reaproveita o AudioDeviceSelectorComponent do JUCE, mas
     // sem a parte de MIDI (que agora tem aba própria).
     auto* audioSelector = new juce::AudioDeviceSelectorComponent(
-        deviceManagerToUse,
+        engineToUse.getDeviceManager(),
         0, 0,       // canais de entrada de audio - nao usamos
         0, 2,       // canais de saida de audio
         false,      // sem seletor de entradas MIDI aqui (tem aba propria)
@@ -107,7 +216,8 @@ PreferencesWindow::PreferencesWindow(juce::AudioDeviceManager& deviceManagerToUs
         false);     // nao esconder opcoes avancadas atras de botao
 
     tabs.addTab("Audio", tabBackground, audioSelector, true);
-    tabs.addTab("MIDI", tabBackground, new MidiSettingsComponent(deviceManagerToUse), true);
+    tabs.addTab("MIDI", tabBackground, new MidiSettingsComponent(engineToUse.getDeviceManager()), true);
+    tabs.addTab("Plugins", tabBackground, new PluginSettingsComponent(engineToUse), true);
 
     setUsingNativeTitleBar(true);
     setContentNonOwned(&tabs, true);

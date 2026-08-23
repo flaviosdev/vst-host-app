@@ -1,5 +1,32 @@
 #include "MainComponent.h"
 
+namespace
+{
+class PluginListModel : public juce::ListBoxModel
+{
+public:
+    explicit PluginListModel(PluginHostEngine& engineToUse) : engine(engineToUse) {}
+    int getNumRows() override { return engine.getKnownPlugins().size(); }
+    void paintListBoxItem(int row, juce::Graphics& g, int width, int height, bool selected) override
+    {
+        const auto plugins = engine.getKnownPlugins();
+        if (row < 0 || row >= plugins.size()) return;
+        if (selected) g.fillAll(juce::Colours::lightblue);
+        g.setColour(juce::Colours::white);
+        const auto& p = plugins[row];
+        g.drawText(p.name + "  [" + p.pluginFormatName + "]", 8, 0, width - 16, height, juce::Justification::centredLeft);
+    }
+    void listBoxItemDoubleClicked(int row, const juce::MouseEvent&) override
+    {
+        const auto plugins = engine.getKnownPlugins();
+        if (row >= 0 && row < plugins.size())
+            engine.loadPlugin(plugins[row]);
+    }
+private:
+    PluginHostEngine& engine;
+};
+}
+
 //==============================================================================
 MainComponent::MainComponent()
 {
@@ -8,8 +35,14 @@ MainComponent::MainComponent()
     addAndMakeVisible(audioSettingsButton);
     audioSettingsButton.onClick = [this] { showPreferences(); };
 
+    addAndMakeVisible(pluginList);
+    pluginListModel = std::make_unique<PluginListModel>(engine);
+    pluginList.setModel(pluginListModel.get());
+    pluginList.setRowHeight(28);
+
     addAndMakeVisible(loadPluginButton);
-    loadPluginButton.onClick = [this] { loadPlugin(); };
+    loadPluginButton.onClick = [this] { loadSelectedPlugin(); };
+    refreshPluginList();
 
     addAndMakeVisible(showEditorButton);
     showEditorButton.onClick = [this] { openPluginEditor(); };
@@ -75,6 +108,9 @@ void MainComponent::resized()
     auto area = getLocalBounds().reduced(12);
 
     audioSettingsButton.setBounds(area.removeFromTop(30));
+    area.removeFromTop(8);
+
+    pluginList.setBounds(area.removeFromTop(150));
     area.removeFromTop(8);
 
     loadPluginButton.setBounds(area.removeFromTop(30));
@@ -147,8 +183,17 @@ void MainComponent::pluginChanged()
 
 void MainComponent::audioDeviceChanged()
 {
-    // Reservado para o dia em que algum widget precisar refletir mudanças
-    // de dispositivo de áudio/MIDI. Hoje nenhum widget depende disso.
+}
+
+void MainComponent::pluginsChanged()
+{
+    refreshPluginList();
+}
+
+void MainComponent::refreshPluginList()
+{
+    pluginList.updateContent();
+    pluginList.repaint();
 }
 
 //==============================================================================
@@ -162,7 +207,7 @@ void MainComponent::showPreferences()
         return;
     }
 
-    preferencesWindow = std::make_unique<PreferencesWindow>(engine.getDeviceManager());
+    preferencesWindow = std::make_unique<PreferencesWindow>(engine);
     preferencesWindow->onCloseRequested = [this]
     {
         engine.saveAudioDeviceState(); // salva já ao fechar as preferências, não só ao sair do app
@@ -173,27 +218,20 @@ void MainComponent::showPreferences()
 //==============================================================================
 //  Plugin
 //==============================================================================
-void MainComponent::loadPlugin()
+void MainComponent::loadSelectedPlugin() 
 {
-    auto chooser = std::make_shared<juce::FileChooser>(
-        "Selecione um plugin VST2 (.dll) ou VST3 (.vst3)",
-        juce::File::getSpecialLocation(juce::File::globalApplicationsDirectory),
-        "*.vst3;*.dll");
-
-    auto flags = juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles;
-
-    chooser->launchAsync(flags, [this, chooser](const juce::FileChooser& fc)
+    const int row = pluginList.getSelectedRow();
+    const auto plugins = engine.getKnownPlugins();
+    if (row < 0 || row >= plugins.size())
     {
-        auto file = fc.getResult();
-        if (file == juce::File{})
-            return; // usuário cancelou
+        setStatus("Selecione um plugin na lista.");
+        return;
+    }
 
-        auto result = engine.loadPluginFromFile(file);
-
-        setStatus(result.success
-                       ? "Plugin carregado com sucesso."
-                       : "Erro ao carregar plugin: " + result.errorMessage);
-    });
+    const auto result = engine.loadPlugin(plugins[row]);
+    setStatus(result.success
+                  ? "Plugin carregado com sucesso."
+                  : "Erro ao carregar plugin: " + result.errorMessage);
 }
 
 void MainComponent::openPluginEditor()

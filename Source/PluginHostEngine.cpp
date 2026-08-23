@@ -4,6 +4,7 @@
 PluginHostEngine::PluginHostEngine()
 {
     formatManager.addDefaultFormats();
+    loadPluginSettings();
 
     auto savedState = loadAudioDeviceState();
     deviceManager.initialise(0, 2, savedState.get(), true);
@@ -18,6 +19,7 @@ PluginHostEngine::~PluginHostEngine()
     deviceManager.removeChangeListener(this);
     unloadPlugin();
     saveAudioDeviceState();
+    savePluginSettings();
     deviceManager.removeAudioCallback(&audioProcessorPlayer);
     deviceManager.closeAudioDevice();
 }
@@ -83,6 +85,144 @@ void PluginHostEngine::saveAudioDeviceState()
     auto file = getSettingsFile();
     file.getParentDirectory().createDirectory();
     xml->writeTo(file);
+}
+
+
+//==============================================================================
+//  Plugins
+//==============================================================================
+juce::File PluginHostEngine::getPluginPathsFile() const
+{
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+               .getChildFile("VSTHostApp")
+               .getChildFile("PluginPaths.xml");
+}
+
+juce::File PluginHostEngine::getKnownPluginsFile() const
+{
+    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+               .getChildFile("VSTHostApp")
+               .getChildFile("KnownPlugins.xml");
+}
+
+void PluginHostEngine::loadPluginSettings()
+{
+    if (auto xml = juce::XmlDocument::parse(getPluginPathsFile()))
+    {
+        // Paths are kept in a small XML file; defaults are used only when the
+        // user has never configured the list.
+        pluginSearchPaths.clear();
+        forEachXmlChildElement(*xml, child)
+            if (child->hasTagName("Path"))
+                pluginSearchPaths.addIfNotAlreadyThere(child->getStringAttribute("value"));
+    }
+
+    if (pluginSearchPaths.isEmpty())
+    {
+        for (int i = 0; i < formatManager.getNumFormats(); ++i)
+        {
+            auto* format = formatManager.getFormat(i);
+            const auto defaults = format->getDefaultLocationsToSearch();
+            for (int pathIndex = 0; pathIndex < defaults.getNumPaths(); ++pathIndex)
+                pluginSearchPaths.addIfNotAlreadyThere(defaults[pathIndex].getFullPathName());
+        }
+    }
+
+    if (auto xml = juce::XmlDocument::parse(getKnownPluginsFile()))
+        knownPluginList.recreateFromXml(*xml);
+}
+
+void PluginHostEngine::savePluginSettings()
+{
+    auto directory = getPluginPathsFile().getParentDirectory();
+    directory.createDirectory();
+
+    juce::XmlElement paths("PluginPaths");
+    for (const auto& path : pluginSearchPaths)
+    {
+        auto* child = paths.createNewChildElement("Path");
+        child->setAttribute("value", path);
+    }
+    paths.writeTo(getPluginPathsFile());
+
+    if (auto xml = knownPluginList.createXml())
+        xml->writeTo(getKnownPluginsFile());
+}
+
+juce::StringArray PluginHostEngine::getPluginSearchPaths() const
+{
+    return pluginSearchPaths;
+}
+
+void PluginHostEngine::addPluginSearchPath(const juce::File& directory)
+{
+    if (directory.isDirectory())
+    {
+        pluginSearchPaths.addIfNotAlreadyThere(directory.getFullPathName());
+        savePluginSettings();
+    }
+}
+
+void PluginHostEngine::removePluginSearchPath(const juce::File& directory)
+{
+    pluginSearchPaths.removeString(directory.getFullPathName());
+    savePluginSettings();
+}
+
+void PluginHostEngine::scanPlugins(bool scanNewOnly)
+{
+    if (!scanNewOnly)
+        knownPluginList.clear();
+
+    for (int i = 0; i < formatManager.getNumFormats(); ++i)
+    {
+        auto* format = formatManager.getFormat(i);
+        juce::FileSearchPath searchPath;
+        for (const auto& path : pluginSearchPaths)
+            searchPath.add(path);
+
+        juce::PluginDirectoryScanner scanner(knownPluginList, *format, searchPath, true,
+                                             getKnownPluginsFile().getSiblingFile("DeadMansPedal.xml"));
+        juce::String name;
+        while (scanner.scanNextFile(scanNewOnly, name)) {}
+    }
+
+    knownPluginList.sort(juce::KnownPluginList::sortAlphabetically, true);
+    savePluginSettings();
+    listeners.call([](Listener& l) { l.pluginsChanged(); });
+}
+
+juce::Array<juce::PluginDescription> PluginHostEngine::getKnownPlugins() const
+{
+    return knownPluginList.getTypes();
+}
+
+PluginHostEngine::LoadResult PluginHostEngine::loadPlugin(const juce::PluginDescription& description)
+{
+    unloadPlugin();
+
+    juce::String errorMessage;
+    auto* device = deviceManager.getCurrentAudioDevice();
+    const double sampleRate = device != nullptr ? device->getCurrentSampleRate() : 44100.0;
+    const int blockSize = device != nullptr ? device->getCurrentBufferSizeSamples() : 512;
+
+    auto newPlugin = formatManager.createPluginInstance(description, sampleRate, blockSize, errorMessage);
+    if (newPlugin == nullptr)
+    {
+        listeners.call([](Listener& l) { l.pluginChanged(); });
+        return { false, errorMessage, {} };
+    }
+
+    newPlugin->prepareToPlay(sampleRate, blockSize);
+    plugin = std::move(newPlugin);
+    audioProcessorPlayer.setProcessor(plugin.get());
+
+    const auto presetKey = juce::File::createLegalFileName(
+        description.name + "_" + juce::String(description.uniqueId));
+    presetManager.setActivePlugin(presetKey);
+
+    listeners.call([](Listener& l) { l.pluginChanged(); });
+    return { true, {}, description.name };
 }
 
 //==============================================================================

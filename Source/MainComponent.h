@@ -24,10 +24,12 @@ private:
     //== PluginHostEngine::Listener ============================================
     void pluginChanged() override;
     void audioDeviceChanged() override;
+    void pluginsChanged() override;
 
     //== Ações da UI (cada uma só delega pro Engine e atualiza widgets) ========
     void showPreferences();
-    void loadPlugin();
+    void refreshPluginList();
+    void loadSelectedPlugin();
     void openPluginEditor();
     void closePluginEditorWindow();
 
@@ -49,7 +51,9 @@ private:
 
     //== Widgets ================================================================
     juce::TextButton audioSettingsButton   { "Preferencias..." };
-    juce::TextButton loadPluginButton      { "Carregar Plugin (VST2/VST3)..." };
+    juce::TextButton loadPluginButton      { "Carregar Plugin..." };
+    std::unique_ptr<juce::ListBoxModel> pluginListModel;
+    juce::ListBox pluginList;
     juce::TextButton showEditorButton      { "Abrir Interface do Plugin" };
     juce::Label      pluginNameLabel;
     juce::Label      statusLabel;
