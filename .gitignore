@@ -3,6 +3,7 @@
 # ============================================================
 build/
 build-*/
+build_*/
 out/
 CMakeFiles/
 CMakeCache.txt
