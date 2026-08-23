@@ -59,6 +59,7 @@ juce_add_gui_app(VSTHostApp
 
 target_sources(VSTHostApp PRIVATE
     Source/Main.cpp
+    Source/PluginHostEngine.cpp
     Source/MainComponent.cpp
     Source/PresetManager.cpp
     Source/PreferencesWindow.cpp

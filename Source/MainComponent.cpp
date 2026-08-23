@@ -3,30 +3,8 @@
 //==============================================================================
 MainComponent::MainComponent()
 {
-    // ------------------------------------------------------------------
-    // Registra os formatos de plugin suportados (VST3, habilitado no CMake)
-    // ------------------------------------------------------------------
-    formatManager.addDefaultFormats();
+    engine.addListener(this);
 
-    // ------------------------------------------------------------------
-    // Inicializa o gerenciador de áudio, restaurando a última configuração
-    // salva (driver ASIO escolhido, dispositivos MIDI habilitados, etc.),
-    // se existir. Sem entradas de áudio por padrão, 2 saídas.
-    // ------------------------------------------------------------------
-    auto savedAudioState = loadAudioDeviceState();
-    deviceManager.initialise(0, 2, savedAudioState.get(), true);
-    deviceManager.addChangeListener(this);
-
-    // Liga o "player" (que recebe áudio e MIDI e os envia ao plugin) ao
-    // dispositivo de áudio atual.
-    deviceManager.addAudioCallback(&audioProcessorPlayer);
-
-    // Conecta os dispositivos MIDI já habilitados.
-    connectMidiInputs();
-
-    // ------------------------------------------------------------------
-    // UI
-    // ------------------------------------------------------------------
     addAndMakeVisible(audioSettingsButton);
     audioSettingsButton.onClick = [this] { showPreferences(); };
 
@@ -50,12 +28,9 @@ MainComponent::MainComponent()
     factoryProgramBox.setEnabled(false);
     factoryProgramBox.onChange = [this]
     {
-        if (plugin != nullptr)
-        {
-            const auto index = factoryProgramBox.getSelectedId() - 1;
-            if (index >= 0)
-                plugin->setCurrentProgram(index);
-        }
+        const auto index = factoryProgramBox.getSelectedId() - 1;
+        if (index >= 0)
+            engine.setCurrentFactoryProgram(index);
     };
 
     addAndMakeVisible(userPresetLabel);
@@ -78,11 +53,15 @@ MainComponent::MainComponent()
 
 MainComponent::~MainComponent()
 {
-    deviceManager.removeChangeListener(this);
-    unloadPlugin();
-    saveAudioDeviceState();
-    deviceManager.removeAudioCallback(&audioProcessorPlayer);
-    deviceManager.closeAudioDevice();
+    // Se desregistra da Engine antes de qualquer coisa: a partir daqui, nada
+    // mais deve chamar pluginChanged()/audioDeviceChanged() nesta instância.
+    engine.removeListener(this);
+
+    closePluginEditorWindow();
+    preferencesWindow.reset();
+
+    // A Engine (membro declarado depois dos widgets) só é destruída depois
+    // do corpo deste destrutor, e salva o estado de áudio/MIDI sozinha.
 }
 
 //==============================================================================
@@ -140,7 +119,40 @@ void MainComponent::setStatus(const juce::String& message)
 }
 
 //==============================================================================
-//  Áudio / MIDI
+//  PluginHostEngine::Listener
+//==============================================================================
+void MainComponent::pluginChanged()
+{
+    if (engine.hasPluginLoaded())
+    {
+        pluginNameLabel.setText("Plugin carregado: " + engine.getPluginName(), juce::dontSendNotification);
+        showEditorButton.setEnabled(true);
+        savePresetButton.setEnabled(true);
+        loadPresetButton.setEnabled(true);
+        deletePresetButton.setEnabled(true);
+    }
+    else
+    {
+        pluginNameLabel.setText("Nenhum plugin carregado", juce::dontSendNotification);
+        showEditorButton.setEnabled(false);
+        savePresetButton.setEnabled(false);
+        loadPresetButton.setEnabled(false);
+        deletePresetButton.setEnabled(false);
+        closePluginEditorWindow();
+    }
+
+    refreshFactoryProgramBox();
+    refreshUserPresetBox();
+}
+
+void MainComponent::audioDeviceChanged()
+{
+    // Reservado para o dia em que algum widget precisar refletir mudanças
+    // de dispositivo de áudio/MIDI. Hoje nenhum widget depende disso.
+}
+
+//==============================================================================
+//  Preferências
 //==============================================================================
 void MainComponent::showPreferences()
 {
@@ -150,77 +162,19 @@ void MainComponent::showPreferences()
         return;
     }
 
-    preferencesWindow = std::make_unique<PreferencesWindow>(deviceManager);
+    preferencesWindow = std::make_unique<PreferencesWindow>(engine.getDeviceManager());
     preferencesWindow->onCloseRequested = [this]
     {
-        saveAudioDeviceState(); // salva já ao fechar as preferências, não só ao sair do app
+        engine.saveAudioDeviceState(); // salva já ao fechar as preferências, não só ao sair do app
         preferencesWindow.reset();
     };
 }
 
-juce::File MainComponent::getSettingsFile() const
-{
-    return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-               .getChildFile("VSTHostApp")
-               .getChildFile("AudioSettings.xml");
-}
-
-std::unique_ptr<juce::XmlElement> MainComponent::loadAudioDeviceState() const
-{
-    auto file = getSettingsFile();
-
-    if (!file.existsAsFile())
-        return nullptr;
-
-    return juce::XmlDocument::parse(file);
-}
-
-void MainComponent::saveAudioDeviceState()
-{
-    auto xml = deviceManager.createStateXml();
-    if (xml == nullptr)
-        return;
-
-    auto file = getSettingsFile();
-    file.getParentDirectory().createDirectory();
-    xml->writeTo(file);
-}
-
-void MainComponent::connectMidiInputs()
-{
-    // Remove callbacks antigos e reconecta com base no que está habilitado
-    // agora no AudioDeviceManager. Isso é chamado na inicialização e sempre
-    // que a configuração de dispositivos mudar (ex.: usuário habilitou um
-    // teclado MIDI na tela de configurações).
-    for (const auto& midiInput : juce::MidiInput::getAvailableDevices())
-    {
-        const bool isEnabled = deviceManager.isMidiInputDeviceEnabled(midiInput.identifier);
-
-        // addMidiInputDeviceCallback ignora silenciosamente se o dispositivo
-        // não estiver habilitado, e removeMidiInputDeviceCallback ignora se
-        // o callback não estiver registrado - então é seguro chamar sempre.
-        deviceManager.removeMidiInputDeviceCallback(midiInput.identifier, &audioProcessorPlayer);
-
-        if (isEnabled)
-            deviceManager.addMidiInputDeviceCallback(midiInput.identifier, &audioProcessorPlayer);
-    }
-}
-
-void MainComponent::changeListenerCallback(juce::ChangeBroadcaster* source)
-{
-    if (source == &deviceManager)
-        connectMidiInputs();
-}
-
 //==============================================================================
-//  Plugin VST3
+//  Plugin
 //==============================================================================
 void MainComponent::loadPlugin()
 {
-    // Aceita tanto .vst3 (plugins modernos, empacotados como pasta/bundle)
-    // quanto .dll (plugins VST2 legados, arquivo solto). O código abaixo
-    // já detecta automaticamente qual formato é qual - não precisa de
-    // nenhuma escolha manual do usuário.
     auto chooser = std::make_shared<juce::FileChooser>(
         "Selecione um plugin VST2 (.dll) ou VST3 (.vst3)",
         juce::File::getSpecialLocation(juce::File::globalApplicationsDirectory),
@@ -234,80 +188,17 @@ void MainComponent::loadPlugin()
         if (file == juce::File{})
             return; // usuário cancelou
 
-        unloadPlugin();
+        auto result = engine.loadPluginFromFile(file);
 
-        juce::OwnedArray<juce::PluginDescription> typesFound;
-
-        // Varre o arquivo/bundle .vst3 selecionado em busca dos formatos
-        // registrados (VST3). Um único arquivo pode conter mais de um plugin.
-        for (int i = 0; i < formatManager.getNumFormats(); ++i)
-        {
-            auto* format = formatManager.getFormat(i);
-            knownPluginList.scanAndAddFile(file.getFullPathName(), true, typesFound, *format);
-        }
-
-        if (typesFound.isEmpty())
-        {
-            setStatus("Nao foi possivel identificar um plugin valido nesse arquivo.");
-            return;
-        }
-
-        const auto& description = *typesFound.getFirst();
-
-        juce::String errorMessage;
-        auto* device = deviceManager.getCurrentAudioDevice();
-        const double sampleRate = device != nullptr ? device->getCurrentSampleRate() : 44100.0;
-        const int blockSize = device != nullptr ? device->getCurrentBufferSizeSamples() : 512;
-
-        plugin = formatManager.createPluginInstance(description, sampleRate, blockSize, errorMessage);
-
-        if (plugin == nullptr)
-        {
-            setStatus("Erro ao carregar plugin: " + errorMessage);
-            return;
-        }
-
-        plugin->prepareToPlay(sampleRate, blockSize);
-        audioProcessorPlayer.setProcessor(plugin.get());
-
-        pluginNameLabel.setText("Plugin carregado: " + description.name, juce::dontSendNotification);
-        setStatus("Plugin carregado com sucesso.");
-        showEditorButton.setEnabled(true);
-        savePresetButton.setEnabled(true);
-        loadPresetButton.setEnabled(true);
-        deletePresetButton.setEnabled(true);
-
-        presetManager.setActivePlugin(description.name);
-        refreshFactoryProgramBox();
-        refreshUserPresetBox();
+        setStatus(result.success
+                       ? "Plugin carregado com sucesso."
+                       : "Erro ao carregar plugin: " + result.errorMessage);
     });
-}
-
-void MainComponent::unloadPlugin()
-{
-    closePluginEditorWindow();
-
-    audioProcessorPlayer.setProcessor(nullptr);
-
-    if (plugin != nullptr)
-    {
-        plugin->releaseResources();
-        plugin.reset();
-    }
-
-    pluginNameLabel.setText("Nenhum plugin carregado", juce::dontSendNotification);
-    showEditorButton.setEnabled(false);
-    savePresetButton.setEnabled(false);
-    loadPresetButton.setEnabled(false);
-    deletePresetButton.setEnabled(false);
-    factoryProgramBox.clear();
-    factoryProgramBox.setEnabled(false);
-    userPresetBox.clear();
 }
 
 void MainComponent::openPluginEditor()
 {
-    if (plugin == nullptr)
+    if (!engine.hasPluginLoaded())
         return;
 
     if (pluginEditorWindow != nullptr)
@@ -316,7 +207,7 @@ void MainComponent::openPluginEditor()
         return;
     }
 
-    auto* editor = plugin->createEditorIfNeeded();
+    auto* editor = engine.createPluginEditorIfNeeded();
     if (editor == nullptr)
     {
         setStatus("Este plugin nao possui interface grafica propria.");
@@ -344,7 +235,7 @@ void MainComponent::openPluginEditor()
         std::function<void()> onClose;
     };
 
-    auto* window = new EditorWindow(plugin->getName(), [this] { closePluginEditorWindow(); });
+    auto* window = new EditorWindow(engine.getPluginName(), [this] { closePluginEditorWindow(); });
     pluginEditorWindow.reset(window);
 
     window->setUsingNativeTitleBar(true);
@@ -367,19 +258,17 @@ void MainComponent::refreshFactoryProgramBox()
 {
     factoryProgramBox.clear();
 
-    if (plugin == nullptr || plugin->getNumPrograms() <= 0)
+    auto names = engine.getFactoryProgramNames();
+    if (names.isEmpty())
     {
         factoryProgramBox.setEnabled(false);
         return;
     }
 
-    for (int i = 0; i < plugin->getNumPrograms(); ++i)
-    {
-        auto name = plugin->getProgramName(i);
-        factoryProgramBox.addItem(name.isNotEmpty() ? name : ("Programa " + juce::String(i + 1)), i + 1);
-    }
+    for (int i = 0; i < names.size(); ++i)
+        factoryProgramBox.addItem(names[i], i + 1);
 
-    factoryProgramBox.setSelectedId(plugin->getCurrentProgram() + 1, juce::dontSendNotification);
+    factoryProgramBox.setSelectedId(engine.getCurrentFactoryProgram() + 1, juce::dontSendNotification);
     factoryProgramBox.setEnabled(true);
 }
 
@@ -387,7 +276,7 @@ void MainComponent::refreshUserPresetBox()
 {
     userPresetBox.clear();
 
-    auto presets = presetManager.listPresets();
+    auto presets = engine.getUserPresetNames();
     int id = 1;
     for (const auto& name : presets)
         userPresetBox.addItem(name, id++);
@@ -395,7 +284,7 @@ void MainComponent::refreshUserPresetBox()
 
 void MainComponent::saveCurrentAsPreset()
 {
-    if (plugin == nullptr)
+    if (!engine.hasPluginLoaded())
         return;
 
     auto* window = new juce::AlertWindow("Salvar Preset",
@@ -409,14 +298,14 @@ void MainComponent::saveCurrentAsPreset()
     {
         std::unique_ptr<juce::AlertWindow> owned(window);
 
-        if (result != 1 || plugin == nullptr)
+        if (result != 1)
             return;
 
         auto name = owned->getTextEditorContents("presetName").trim();
         if (name.isEmpty())
             return;
 
-        if (presetManager.savePreset(*plugin, name))
+        if (engine.saveUserPreset(name))
         {
             setStatus("Preset \"" + name + "\" salvo.");
             refreshUserPresetBox();
@@ -430,14 +319,11 @@ void MainComponent::saveCurrentAsPreset()
 
 void MainComponent::loadSelectedPreset()
 {
-    if (plugin == nullptr)
-        return;
-
     auto name = userPresetBox.getText();
     if (name.isEmpty())
         return;
 
-    if (presetManager.loadPreset(*plugin, name))
+    if (engine.loadUserPreset(name))
     {
         setStatus("Preset \"" + name + "\" carregado.");
         refreshFactoryProgramBox(); // o preset pode ter mudado o programa atual
@@ -454,7 +340,7 @@ void MainComponent::deleteSelectedPreset()
     if (name.isEmpty())
         return;
 
-    if (presetManager.deletePreset(name))
+    if (engine.deleteUserPreset(name))
     {
         setStatus("Preset \"" + name + "\" excluido.");
         refreshUserPresetBox();

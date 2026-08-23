@@ -1,18 +1,17 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "PluginHostEngine.h"
 #include "PreferencesWindow.h"
-#include "PresetManager.h"
 
 /**
-    Janela principal:
-      - Botão para abrir as configurações de Áudio/MIDI (ASIO + dispositivos MIDI)
-      - Botão para carregar um plugin VST3
-      - Botão para abrir a interface gráfica do plugin
-      - Painel de presets (programas de fábrica + presets salvos pelo usuário)
+    MainComponent é a View principal: só cuida de widgets e de reagir a
+    notificações do PluginHostEngine. Não conhece AudioDeviceManager,
+    AudioPluginFormatManager, nem nenhum detalhe de como o áudio/MIDI/plugin
+    funciona por baixo dos panos - isso tudo vive na Engine.
 */
 class MainComponent : public juce::Component,
-                       private juce::ChangeListener
+                       private PluginHostEngine::Listener
 {
 public:
     MainComponent();
@@ -22,36 +21,15 @@ public:
     void resized() override;
 
 private:
-    //== Áudio / MIDI ==========================================================
-    juce::AudioDeviceManager deviceManager;
-    juce::AudioProcessorPlayer audioProcessorPlayer;
-    std::unique_ptr<PreferencesWindow> preferencesWindow;
+    //== PluginHostEngine::Listener ============================================
+    void pluginChanged() override;
+    void audioDeviceChanged() override;
 
+    //== Ações da UI (cada uma só delega pro Engine e atualiza widgets) ========
     void showPreferences();
-    void connectMidiInputs();
-    // Chamado pelo AudioDeviceManager quando a configuração muda
-    // (ex.: usuário habilitou/desabilitou um dispositivo MIDI)
-    void changeListenerCallback(juce::ChangeBroadcaster*) override;
-
-    // Persistência da configuração de áudio/MIDI em disco (%APPDATA%)
-    juce::File getSettingsFile() const;
-    std::unique_ptr<juce::XmlElement> loadAudioDeviceState() const;
-    void saveAudioDeviceState();
-
-    //== Plugin VST3 ===========================================================
-    juce::AudioPluginFormatManager formatManager;
-    juce::KnownPluginList knownPluginList;
-    std::unique_ptr<juce::AudioPluginInstance> plugin;
-    std::unique_ptr<juce::AudioProcessorEditor> pluginEditorComponent;
-    std::unique_ptr<juce::DocumentWindow> pluginEditorWindow;
-
     void loadPlugin();
-    void unloadPlugin();
     void openPluginEditor();
     void closePluginEditorWindow();
-
-    //== Presets ===============================================================
-    PresetManager presetManager;
 
     void refreshFactoryProgramBox();
     void refreshUserPresetBox();
@@ -59,7 +37,17 @@ private:
     void loadSelectedPreset();
     void deleteSelectedPreset();
 
-    //== UI ====================================================================
+    void setStatus(const juce::String& message);
+
+    //== Model (Engine) =========================================================
+    PluginHostEngine engine;
+
+    //== Estado que pertence só à UI ===========================================
+    std::unique_ptr<PreferencesWindow> preferencesWindow;
+    std::unique_ptr<juce::AudioProcessorEditor> pluginEditorComponent;
+    std::unique_ptr<juce::DocumentWindow> pluginEditorWindow;
+
+    //== Widgets ================================================================
     juce::TextButton audioSettingsButton   { "Preferencias..." };
     juce::TextButton loadPluginButton      { "Carregar Plugin (VST2/VST3)..." };
     juce::TextButton showEditorButton      { "Abrir Interface do Plugin" };
@@ -74,8 +62,6 @@ private:
     juce::TextButton savePresetButton      { "Salvar como..." };
     juce::TextButton loadPresetButton      { "Carregar" };
     juce::TextButton deletePresetButton    { "Excluir" };
-
-    void setStatus(const juce::String& message);
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };
