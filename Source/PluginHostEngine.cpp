@@ -1,7 +1,49 @@
 #include "PluginHostEngine.h"
 
+PluginHostEngine::ParallelPluginProcessor::ParallelPluginProcessor(PluginHostEngine& ownerToUse)
+    : AudioProcessor(BusesProperties()
+                         .withInput("Input", juce::AudioChannelSet::stereo(), true)
+                         .withOutput("Output", juce::AudioChannelSet::stereo(), true)),
+      owner(ownerToUse)
+{
+}
+
+void PluginHostEngine::ParallelPluginProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
+{
+    const juce::ScopedLock lock(owner.pluginListLock);
+    for (auto& loadedPtr : owner.loadedPlugins)
+    {
+        auto& loaded = *loadedPtr;
+        loaded.sampleRate = sampleRate;
+        loaded.blockSize = samplesPerBlock;
+        loaded.scratchBuffer.setSize(2, samplesPerBlock, false, false, true);
+        loaded.instance->prepareToPlay(sampleRate, samplesPerBlock);
+    }
+}
+
+void PluginHostEngine::ParallelPluginProcessor::releaseResources()
+{
+    const juce::ScopedLock lock(owner.pluginListLock);
+    for (auto& loadedPtr : owner.loadedPlugins)
+        loadedPtr->instance->releaseResources();
+}
+
+void PluginHostEngine::ParallelPluginProcessor::processBlock(juce::AudioBuffer<float>& buffer,
+                                                               juce::MidiBuffer& midiMessages)
+{
+    owner.processPlugins(buffer, midiMessages);
+}
+
+void PluginHostEngine::ParallelPluginProcessor::processBlock(juce::AudioBuffer<double>& buffer,
+                                                               juce::MidiBuffer& midiMessages)
+{
+    buffer.clear();
+    juce::ignoreUnused(midiMessages);
+}
+
 //==============================================================================
 PluginHostEngine::PluginHostEngine()
+    : parallelProcessor(*this)
 {
     formatManager.addDefaultFormats();
     loadPluginSettings();
@@ -9,6 +51,7 @@ PluginHostEngine::PluginHostEngine()
     auto savedState = loadAudioDeviceState();
     deviceManager.initialise(0, 2, savedState.get(), true);
     deviceManager.addChangeListener(this);
+    audioProcessorPlayer.setProcessor(&parallelProcessor);
     deviceManager.addAudioCallback(&audioProcessorPlayer);
 
     connectMidiInputs();
@@ -17,34 +60,24 @@ PluginHostEngine::PluginHostEngine()
 PluginHostEngine::~PluginHostEngine()
 {
     deviceManager.removeChangeListener(this);
-    unloadPlugin();
+    deviceManager.removeAudioCallback(&audioProcessorPlayer);
+    audioProcessorPlayer.setProcessor(nullptr);
+    unloadPlugins();
     saveAudioDeviceState();
     savePluginSettings();
-    deviceManager.removeAudioCallback(&audioProcessorPlayer);
     deviceManager.closeAudioDevice();
 }
 
-void PluginHostEngine::addListener(Listener* listenerToAdd)
-{
-    listeners.add(listenerToAdd);
-}
+void PluginHostEngine::addListener(Listener* listenerToAdd) { listeners.add(listenerToAdd); }
+void PluginHostEngine::removeListener(Listener* listenerToRemove) { listeners.remove(listenerToRemove); }
 
-void PluginHostEngine::removeListener(Listener* listenerToRemove)
-{
-    listeners.remove(listenerToRemove);
-}
-
-//==============================================================================
-//  Áudio / MIDI
 //==============================================================================
 void PluginHostEngine::connectMidiInputs()
 {
     for (const auto& midiInput : juce::MidiInput::getAvailableDevices())
     {
         const bool isEnabled = deviceManager.isMidiInputDeviceEnabled(midiInput.identifier);
-
         deviceManager.removeMidiInputDeviceCallback(midiInput.identifier, &audioProcessorPlayer);
-
         if (isEnabled)
             deviceManager.addMidiInputDeviceCallback(midiInput.identifier, &audioProcessorPlayer);
     }
@@ -62,55 +95,42 @@ void PluginHostEngine::changeListenerCallback(juce::ChangeBroadcaster* source)
 juce::File PluginHostEngine::getSettingsFile() const
 {
     return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-               .getChildFile("VSTHostApp")
-               .getChildFile("AudioSettings.xml");
+               .getChildFile("VSTHostApp").getChildFile("AudioSettings.xml");
 }
 
 std::unique_ptr<juce::XmlElement> PluginHostEngine::loadAudioDeviceState() const
 {
     auto file = getSettingsFile();
-
-    if (!file.existsAsFile())
-        return nullptr;
-
+    if (!file.existsAsFile()) return nullptr;
     return juce::XmlDocument::parse(file);
 }
 
 void PluginHostEngine::saveAudioDeviceState()
 {
     auto xml = deviceManager.createStateXml();
-    if (xml == nullptr)
-        return;
-
+    if (xml == nullptr) return;
     auto file = getSettingsFile();
     file.getParentDirectory().createDirectory();
     xml->writeTo(file);
 }
 
-
-//==============================================================================
-//  Plugins
 //==============================================================================
 juce::File PluginHostEngine::getPluginPathsFile() const
 {
     return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-               .getChildFile("VSTHostApp")
-               .getChildFile("PluginPaths.xml");
+               .getChildFile("VSTHostApp").getChildFile("PluginPaths.xml");
 }
 
 juce::File PluginHostEngine::getKnownPluginsFile() const
 {
     return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-               .getChildFile("VSTHostApp")
-               .getChildFile("KnownPlugins.xml");
+               .getChildFile("VSTHostApp").getChildFile("KnownPlugins.xml");
 }
 
 void PluginHostEngine::loadPluginSettings()
 {
     if (auto xml = juce::XmlDocument::parse(getPluginPathsFile()))
     {
-        // Paths are kept in a small XML file; defaults are used only when the
-        // user has never configured the list.
         pluginSearchPaths.clear();
         forEachXmlChildElement(*xml, child)
             if (child->hasTagName("Path"))
@@ -149,10 +169,7 @@ void PluginHostEngine::savePluginSettings()
         xml->writeTo(getKnownPluginsFile());
 }
 
-juce::StringArray PluginHostEngine::getPluginSearchPaths() const
-{
-    return pluginSearchPaths;
-}
+juce::StringArray PluginHostEngine::getPluginSearchPaths() const { return pluginSearchPaths; }
 
 void PluginHostEngine::addPluginSearchPath(const juce::File& directory)
 {
@@ -197,10 +214,9 @@ juce::Array<juce::PluginDescription> PluginHostEngine::getKnownPlugins() const
     return knownPluginList.getTypes();
 }
 
+//==============================================================================
 PluginHostEngine::LoadResult PluginHostEngine::loadPlugin(const juce::PluginDescription& description)
 {
-    unloadPlugin();
-
     juce::String errorMessage;
     auto* device = deviceManager.getCurrentAudioDevice();
     const double sampleRate = device != nullptr ? device->getCurrentSampleRate() : 44100.0;
@@ -210,33 +226,46 @@ PluginHostEngine::LoadResult PluginHostEngine::loadPlugin(const juce::PluginDesc
     if (newPlugin == nullptr)
     {
         listeners.call([](Listener& l) { l.pluginChanged(); });
-        return { false, errorMessage, {} };
+        return { false, errorMessage, {}, -1 };
     }
 
-    newPlugin->prepareToPlay(sampleRate, blockSize);
-    plugin = std::move(newPlugin);
-    audioProcessorPlayer.setProcessor(plugin.get());
+    auto loaded = std::make_unique<LoadedPlugin>();
+
+    loaded->id = nextPluginId++;
+    loaded->instance = std::move(newPlugin);
+    loaded->sampleRate = sampleRate;
+    loaded->blockSize = blockSize;
+
+    loaded->scratchBuffer.setSize(
+        2,
+        blockSize,
+        false,
+        false,
+        true
+    );
+
+    loaded->instance->prepareToPlay(sampleRate, blockSize);
 
     const auto presetKey = juce::File::createLegalFileName(
-        description.name + "_" + juce::String(description.uniqueId));
-    presetManager.setActivePlugin(presetKey);
+        description.name + "_" + juce::String(description.uniqueId)
+    );
+
+    loaded->presetManager.setActivePlugin(presetKey);
+
+    const int pluginId = loaded->id;
+
+    {
+        const juce::ScopedLock lock(pluginListLock);
+        loadedPlugins.push_back(std::move(loaded));
+    }
 
     listeners.call([](Listener& l) { l.pluginChanged(); });
-    return { true, {}, description.name };
+    return { true, {}, description.name, pluginId };
 }
 
-//==============================================================================
-//  Ciclo de vida do plugin
-//==============================================================================
 PluginHostEngine::LoadResult PluginHostEngine::loadPluginFromFile(const juce::File& file)
 {
-    unloadPlugin();
-
     juce::OwnedArray<juce::PluginDescription> typesFound;
-
-    // Varre o arquivo/bundle selecionado em busca dos formatos registrados
-    // (VST3, e VST2 quando habilitado no CMake). Um único arquivo pode
-    // conter mais de um plugin.
     for (int i = 0; i < formatManager.getNumFormats(); ++i)
     {
         auto* format = formatManager.getFormat(i);
@@ -244,111 +273,190 @@ PluginHostEngine::LoadResult PluginHostEngine::loadPluginFromFile(const juce::Fi
     }
 
     if (typesFound.isEmpty())
-        return { false, "Nao foi possivel identificar um plugin valido nesse arquivo.", {} };
+        return { false, "Nao foi possivel identificar um plugin valido nesse arquivo.", {}, -1 };
 
-    const auto description = *typesFound.getFirst();
+    return loadPlugin(*typesFound.getFirst());
+}
 
-    juce::String errorMessage;
-    auto* device = deviceManager.getCurrentAudioDevice();
-    const double sampleRate = device != nullptr ? device->getCurrentSampleRate() : 44100.0;
-    const int blockSize = device != nullptr ? device->getCurrentBufferSizeSamples() : 512;
+//==============================================================================
+juce::Array<int> PluginHostEngine::getLoadedPluginIds() const
+{
+    const juce::ScopedLock lock(pluginListLock);
+    juce::Array<int> ids;
+    for (const auto& loaded : loadedPlugins)
+        ids.add(loaded->id);
+    return ids;
+}
 
-    auto newPlugin = formatManager.createPluginInstance(description, sampleRate, blockSize, errorMessage);
+PluginHostEngine::LoadedPlugin* PluginHostEngine::findPlugin(int pluginId) noexcept
+{
+    for (auto& loaded : loadedPlugins)
+        if (loaded->id == pluginId)
+            return loaded.get();
+    return nullptr;
+}
 
-    if (newPlugin == nullptr)
+const PluginHostEngine::LoadedPlugin* PluginHostEngine::findPlugin(int pluginId) const noexcept
+{
+    for (const auto& loaded : loadedPlugins)
+        if (loaded->id == pluginId)
+            return loaded.get();
+    return nullptr;
+}
+
+bool PluginHostEngine::hasPluginLoaded(int pluginId) const
+{
+    const juce::ScopedLock lock(pluginListLock);
+    return findPlugin(pluginId) != nullptr;
+}
+
+juce::String PluginHostEngine::getPluginName(int pluginId) const
+{
+    const juce::ScopedLock lock(pluginListLock);
+    auto* loaded = findPlugin(pluginId);
+    return loaded != nullptr ? loaded->instance->getName() : juce::String();
+}
+
+void PluginHostEngine::unloadPlugin(int pluginId)
+{
     {
-        listeners.call([](Listener& l) { l.pluginChanged(); });
-        return { false, errorMessage, {} };
+        const juce::ScopedLock lock(pluginListLock);
+        auto it = std::find_if(loadedPlugins.begin(), loadedPlugins.end(),
+                               [pluginId](const std::unique_ptr<LoadedPlugin>& p) { return p->id == pluginId; });
+        if (it == loadedPlugins.end())
+            return;
+
+        (*it)->instance->releaseResources();
+        loadedPlugins.erase(it);
     }
-
-    newPlugin->prepareToPlay(sampleRate, blockSize);
-
-    plugin = std::move(newPlugin);
-    audioProcessorPlayer.setProcessor(plugin.get());
-
-    // Chave estável por plugin (nome + id único do formato), em vez de só o
-    // nome de exibição - evita colisão entre dois plugins diferentes que por
-    // coincidência tenham o mesmo nome.
-    const auto presetKey = juce::File::createLegalFileName(
-        description.name + "_" + juce::String(description.uniqueId));
-    presetManager.setActivePlugin(presetKey);
 
     listeners.call([](Listener& l) { l.pluginChanged(); });
-
-    return { true, {}, description.name };
 }
 
-void PluginHostEngine::unloadPlugin()
+void PluginHostEngine::unloadPlugins()
 {
-    audioProcessorPlayer.setProcessor(nullptr);
-
-    if (plugin != nullptr)
     {
-        plugin->releaseResources();
-        plugin.reset();
-        listeners.call([](Listener& l) { l.pluginChanged(); });
+        const juce::ScopedLock lock(pluginListLock);
+        for (auto& loaded : loadedPlugins)
+            loaded->instance->releaseResources();
+        loadedPlugins.clear();
+    }
+
+    listeners.call([](Listener& l) { l.pluginChanged(); });
+}
+
+float PluginHostEngine::getPluginVolume(int pluginId) const
+{
+    const juce::ScopedLock lock(pluginListLock);
+    auto* loaded = findPlugin(pluginId);
+    return loaded != nullptr ? loaded->volume : 1.0f;
+}
+
+void PluginHostEngine::setPluginVolume(int pluginId, float volume)
+{
+    const juce::ScopedLock lock(pluginListLock);
+    if (auto* loaded = findPlugin(pluginId))
+        loaded->volume = juce::jlimit(0.0f, 2.0f, volume);
+}
+
+juce::AudioProcessorEditor* PluginHostEngine::createPluginEditorIfNeeded(int pluginId)
+{
+    const juce::ScopedLock lock(pluginListLock);
+    auto* loaded = findPlugin(pluginId);
+    return loaded != nullptr ? loaded->instance->createEditorIfNeeded() : nullptr;
+}
+
+//==============================================================================
+void PluginHostEngine::prepareLoadedPlugin(LoadedPlugin& loaded)
+{
+    auto* device = deviceManager.getCurrentAudioDevice();
+    loaded.sampleRate = device != nullptr ? device->getCurrentSampleRate() : 44100.0;
+    loaded.blockSize = device != nullptr ? device->getCurrentBufferSizeSamples() : 512;
+    loaded.scratchBuffer.setSize(2, loaded.blockSize, false, false, true);
+    loaded.instance->prepareToPlay(loaded.sampleRate, loaded.blockSize);
+}
+
+void PluginHostEngine::processPlugins(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
+{
+    const juce::ScopedLock lock(pluginListLock);
+    buffer.clear();
+
+    for (auto& loadedPtr : loadedPlugins)
+    {
+        auto& loaded = *loadedPtr;
+        auto& scratch = loaded.scratchBuffer;
+        scratch.clear();
+
+        // Cada plugin recebe uma cópia do MIDI original. Assim, se um plugin
+        // alterar o MidiBuffer durante o processamento, isso não muda o que
+        // os outros plugins recebem.
+        loaded.scratchMidi.clear();
+        loaded.scratchMidi.addEvents(midiMessages, 0, buffer.getNumSamples(), 0);
+
+        loaded.instance->processBlock(scratch, loaded.scratchMidi);
+        scratch.applyGain(loaded.volume);
+
+        const int channelsToMix = juce::jmin(buffer.getNumChannels(), scratch.getNumChannels());
+        for (int channel = 0; channel < channelsToMix; ++channel)
+            buffer.addFrom(channel, 0, scratch, channel, 0, buffer.getNumSamples());
     }
 }
 
-juce::String PluginHostEngine::getPluginName() const
-{
-    return plugin != nullptr ? plugin->getName() : juce::String();
-}
-
-juce::AudioProcessorEditor* PluginHostEngine::createPluginEditorIfNeeded()
-{
-    return plugin != nullptr ? plugin->createEditorIfNeeded() : nullptr;
-}
-
 //==============================================================================
-//  Programas de fábrica
-//==============================================================================
-juce::StringArray PluginHostEngine::getFactoryProgramNames() const
+juce::StringArray PluginHostEngine::getFactoryProgramNames(int pluginId) const
 {
+    const juce::ScopedLock lock(pluginListLock);
     juce::StringArray names;
+    auto* loaded = findPlugin(pluginId);
+    if (loaded == nullptr) return names;
 
-    if (plugin == nullptr)
-        return names;
-
-    for (int i = 0; i < plugin->getNumPrograms(); ++i)
+    for (int i = 0; i < loaded->instance->getNumPrograms(); ++i)
     {
-        auto name = plugin->getProgramName(i);
+        auto name = loaded->instance->getProgramName(i);
         names.add(name.isNotEmpty() ? name : ("Programa " + juce::String(i + 1)));
     }
-
     return names;
 }
 
-int PluginHostEngine::getCurrentFactoryProgram() const
+int PluginHostEngine::getCurrentFactoryProgram(int pluginId) const
 {
-    return plugin != nullptr ? plugin->getCurrentProgram() : -1;
+    const juce::ScopedLock lock(pluginListLock);
+    auto* loaded = findPlugin(pluginId);
+    return loaded != nullptr ? loaded->instance->getCurrentProgram() : -1;
 }
 
-void PluginHostEngine::setCurrentFactoryProgram(int index)
+void PluginHostEngine::setCurrentFactoryProgram(int pluginId, int index)
 {
-    if (plugin != nullptr && index >= 0)
-        plugin->setCurrentProgram(index);
+    const juce::ScopedLock lock(pluginListLock);
+    auto* loaded = findPlugin(pluginId);
+    if (loaded != nullptr && index >= 0)
+        loaded->instance->setCurrentProgram(index);
 }
 
-//==============================================================================
-//  Presets de usuário
-//==============================================================================
-juce::StringArray PluginHostEngine::getUserPresetNames() const
+juce::StringArray PluginHostEngine::getUserPresetNames(int pluginId) const
 {
-    return presetManager.listPresets();
+    const juce::ScopedLock lock(pluginListLock);
+    auto* loaded = findPlugin(pluginId);
+    return loaded != nullptr ? loaded->presetManager.listPresets() : juce::StringArray();
 }
 
-bool PluginHostEngine::saveUserPreset(const juce::String& name)
+bool PluginHostEngine::saveUserPreset(int pluginId, const juce::String& name)
 {
-    return plugin != nullptr && presetManager.savePreset(*plugin, name);
+    const juce::ScopedLock lock(pluginListLock);
+    auto* loaded = findPlugin(pluginId);
+    return loaded != nullptr && loaded->presetManager.savePreset(*loaded->instance, name);
 }
 
-bool PluginHostEngine::loadUserPreset(const juce::String& name)
+bool PluginHostEngine::loadUserPreset(int pluginId, const juce::String& name)
 {
-    return plugin != nullptr && presetManager.loadPreset(*plugin, name);
+    const juce::ScopedLock lock(pluginListLock);
+    auto* loaded = findPlugin(pluginId);
+    return loaded != nullptr && loaded->presetManager.loadPreset(*loaded->instance, name);
 }
 
-bool PluginHostEngine::deleteUserPreset(const juce::String& name)
+bool PluginHostEngine::deleteUserPreset(int pluginId, const juce::String& name)
 {
-    return presetManager.deletePreset(name);
+    const juce::ScopedLock lock(pluginListLock);
+    auto* loaded = findPlugin(pluginId);
+    return loaded != nullptr && loaded->presetManager.deletePreset(name);
 }

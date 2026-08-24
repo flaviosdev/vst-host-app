@@ -1,15 +1,12 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <functional>
+#include <map>
+#include <vector>
 #include "PluginHostEngine.h"
 #include "PreferencesWindow.h"
 
-/**
-    MainComponent é a View principal: só cuida de widgets e de reagir a
-    notificações do PluginHostEngine. Não conhece AudioDeviceManager,
-    AudioPluginFormatManager, nem nenhum detalhe de como o áudio/MIDI/plugin
-    funciona por baixo dos panos - isso tudo vive na Engine.
-*/
 class MainComponent : public juce::Component,
                        private PluginHostEngine::Listener
 {
@@ -21,51 +18,40 @@ public:
     void resized() override;
 
 private:
+    class PluginRowComponent;
+
     //== PluginHostEngine::Listener ============================================
     void pluginChanged() override;
     void audioDeviceChanged() override;
     void pluginsChanged() override;
 
-    //== Ações da UI (cada uma só delega pro Engine e atualiza widgets) ========
+    //== UI ====================================================================
     void showPreferences();
     void refreshPluginList();
+    void refreshLoadedPlugins();
     void loadSelectedPlugin();
-    void openPluginEditor();
-    void closePluginEditorWindow();
-
-    void refreshFactoryProgramBox();
-    void refreshUserPresetBox();
-    void saveCurrentAsPreset();
-    void loadSelectedPreset();
-    void deleteSelectedPreset();
-
+    void openPluginEditor(int pluginId);
+    void closePluginEditor(int pluginId);
+    void savePresetForPlugin(int pluginId);
     void setStatus(const juce::String& message);
 
-    //== Model (Engine) =========================================================
+    //== Model =================================================================
     PluginHostEngine engine;
 
-    //== Estado que pertence só à UI ===========================================
+    //== Estado da UI ==========================================================
     std::unique_ptr<PreferencesWindow> preferencesWindow;
-    std::unique_ptr<juce::AudioProcessorEditor> pluginEditorComponent;
-    std::unique_ptr<juce::DocumentWindow> pluginEditorWindow;
+    std::map<int, std::unique_ptr<juce::AudioProcessorEditor>> pluginEditors;
+    std::map<int, std::unique_ptr<juce::DocumentWindow>> pluginEditorWindows;
+    std::vector<std::unique_ptr<PluginRowComponent>> pluginRows;
 
     //== Widgets ================================================================
-    juce::TextButton audioSettingsButton   { "Preferencias..." };
-    juce::TextButton loadPluginButton      { "Carregar Plugin..." };
-    std::unique_ptr<juce::ListBoxModel> pluginListModel;
+    juce::TextButton audioSettingsButton { "Preferencias..." };
     juce::ListBox pluginList;
-    juce::TextButton showEditorButton      { "Abrir Interface do Plugin" };
-    juce::Label      pluginNameLabel;
-    juce::Label      statusLabel;
-
-    juce::Label      factoryProgramLabel   { {}, "Programas de fabrica:" };
-    juce::ComboBox   factoryProgramBox;
-
-    juce::Label      userPresetLabel       { {}, "Presets salvos:" };
-    juce::ComboBox   userPresetBox;
-    juce::TextButton savePresetButton      { "Salvar como..." };
-    juce::TextButton loadPresetButton      { "Carregar" };
-    juce::TextButton deletePresetButton    { "Excluir" };
+    std::unique_ptr<juce::ListBoxModel> pluginListModel;
+    juce::TextButton loadPluginButton { "Carregar Plugin Selecionado" };
+    juce::Label statusLabel;
+    juce::Viewport loadedPluginsViewport;
+    juce::Component loadedPluginsContainer;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };
