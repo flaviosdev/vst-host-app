@@ -319,6 +319,9 @@ juce::String PluginHostEngine::getPluginName(int pluginId) const
 
 void PluginHostEngine::unloadPlugin(int pluginId)
 {
+    bool sceneWasCleared = false;
+    bool pluginHadBindings = false;
+
     {
         const juce::ScopedLock lock(pluginListLock);
         auto it = std::find_if(loadedPlugins.begin(), loadedPlugins.end(),
@@ -329,11 +332,29 @@ void PluginHostEngine::unloadPlugin(int pluginId)
         if ((*it)->route.solo)
             --activeSoloCount;
 
+        if (activeSceneId == pluginId)
+        {
+            activeSceneId = -1;
+            sceneWasCleared = true;
+        }
+
         (*it)->instance->releaseResources();
         loadedPlugins.erase(it);
+
+        pluginHadBindings = !midiActionMap.getBindingsForPlugin(pluginId).isEmpty();
+        midiActionMap.removeBindingsForPlugin(pluginId);
     }
 
     listeners.call([](Listener& l) { l.pluginChanged(); });
+
+    // Notificado fora do escopo acima e depois de pluginChanged(): a cena
+    // sendo desativada é um evento à parte, e a UI precisa da lista de
+    // plugins já atualizada (sem o que foi removido) pra reagir direito.
+    if (sceneWasCleared)
+        listeners.call([](Listener& l) { l.activeSceneChanged(-1); });
+
+    if (pluginHadBindings)
+        listeners.call([](Listener& l) { l.midiLearnStateChanged(); });
 }
 
 void PluginHostEngine::unloadPlugins()
@@ -344,9 +365,13 @@ void PluginHostEngine::unloadPlugins()
             loaded->instance->releaseResources();
         loadedPlugins.clear();
         activeSoloCount = 0;
+        activeSceneId = -1;
+        midiActionMap.clearAll();
     }
 
     listeners.call([](Listener& l) { l.pluginChanged(); });
+    listeners.call([](Listener& l) { l.activeSceneChanged(-1); });
+    listeners.call([](Listener& l) { l.midiLearnStateChanged(); });
 }
 
 float PluginHostEngine::getPluginVolume(int pluginId) const
@@ -408,6 +433,75 @@ void PluginHostEngine::setPluginSolo(int pluginId, bool shouldBeSolo)
     listeners.call([pluginId](Listener& l) { l.pluginRouteChanged(pluginId); });
 }
 
+void PluginHostEngine::setActiveScene(int pluginId)
+{
+    {
+        const juce::ScopedLock lock(pluginListLock);
+
+        // -1 sempre é uma "cena" válida (significa "desativar"). Qualquer
+        // outro valor precisa apontar pra um plugin que exista de verdade.
+        if (pluginId != -1 && findPlugin(pluginId) == nullptr)
+            return;
+
+        if (activeSceneId == pluginId)
+            return;
+
+        activeSceneId = pluginId;
+    }
+
+    listeners.call([pluginId](Listener& l) { l.activeSceneChanged(pluginId); });
+}
+
+//==============================================================================
+//  MIDI Learn
+//==============================================================================
+void PluginHostEngine::startMidiLearn(MidiTriggerAction action, int targetPluginId)
+{
+    {
+        const juce::ScopedLock lock(pluginListLock);
+        midiActionMap.startLearning(action, targetPluginId);
+    }
+
+    listeners.call([](Listener& l) { l.midiLearnStateChanged(); });
+}
+
+void PluginHostEngine::cancelMidiLearn()
+{
+    {
+        const juce::ScopedLock lock(pluginListLock);
+        if (!midiActionMap.isLearning())
+            return;
+
+        midiActionMap.cancelLearning();
+    }
+
+    listeners.call([](Listener& l) { l.midiLearnStateChanged(); });
+}
+
+bool PluginHostEngine::isMidiLearnTarget(MidiTriggerAction action, int pluginId) const
+{
+    const juce::ScopedLock lock(pluginListLock);
+    return midiActionMap.isLearning()
+        && midiActionMap.getPendingAction() == action
+        && midiActionMap.getPendingPluginId() == pluginId;
+}
+
+juce::Array<MidiTriggerBinding> PluginHostEngine::getMidiBindingsForPlugin(int pluginId) const
+{
+    const juce::ScopedLock lock(pluginListLock);
+    return midiActionMap.getBindingsForPlugin(pluginId);
+}
+
+void PluginHostEngine::clearMidiBinding(MidiTriggerAction action, int pluginId)
+{
+    {
+        const juce::ScopedLock lock(pluginListLock);
+        midiActionMap.removeBindingForAction(action, pluginId);
+    }
+
+    listeners.call([](Listener& l) { l.midiLearnStateChanged(); });
+}
+
 juce::AudioProcessorEditor* PluginHostEngine::createPluginEditorIfNeeded(int pluginId)
 {
     const juce::ScopedLock lock(pluginListLock);
@@ -425,10 +519,72 @@ void PluginHostEngine::prepareLoadedPlugin(LoadedPlugin& loaded)
     loaded.instance->prepareToPlay(loaded.sampleRate, loaded.blockSize);
 }
 
+void PluginHostEngine::interceptLearnableNotes(juce::MidiBuffer& midiMessages)
+{
+    // Fora da thread de áudio isso seria só "if (bindings vazio) return",
+    // mas aqui rodamos a cada bloco - então esse atalho importa de verdade.
+    if (!midiActionMap.isLearning() && !midiActionMap.hasAnyBindings())
+        return;
+
+    juce::MidiBuffer filtered;
+
+    for (const auto metadata : midiMessages)
+    {
+        const auto message = metadata.getMessage();
+
+        if (message.isNoteOn() || message.isNoteOff())
+        {
+            const int noteNumber = message.getNoteNumber();
+            const int channel = message.getChannel();
+
+            // Modo de captura: a primeira nota pressionada vira o binding
+            // e nunca chega em nenhum plugin - é só um controle a partir daqui.
+            if (midiActionMap.isLearning() && message.isNoteOn())
+            {
+                if (midiActionMap.learnFrom(noteNumber, channel))
+                {
+                    juce::MessageManager::callAsync([this]
+                    {
+                        listeners.call([](Listener& l) { l.midiLearnStateChanged(); });
+                    });
+                    continue; // consumida - não passa pro filtered
+                }
+            }
+
+            // Tecla já vinculada a uma ação: nunca soa (nem no Note On, nem
+            // no Note Off), e o Note On dispara a ação correspondente.
+            if (const auto* binding = midiActionMap.findBinding(noteNumber, channel))
+            {
+                if (message.isNoteOn())
+                {
+                    const auto action = binding->action;
+                    const auto pluginId = binding->targetPluginId;
+
+                    juce::MessageManager::callAsync([this, action, pluginId]
+                    {
+                        if (action == MidiTriggerAction::toggleMute)
+                            setPluginMuted(pluginId, !isPluginMuted(pluginId));
+                        else
+                            setPluginSolo(pluginId, !isPluginSolo(pluginId));
+                    });
+                }
+
+                continue; // consumida - não passa pro filtered
+            }
+        }
+
+        filtered.addEvent(message, metadata.samplePosition);
+    }
+
+    midiMessages.swapWith(filtered);
+}
+
 void PluginHostEngine::processPlugins(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     const juce::ScopedLock lock(pluginListLock);
     buffer.clear();
+
+    interceptLearnableNotes(midiMessages);
 
     for (auto& loadedPtr : loadedPlugins)
     {
@@ -436,11 +592,11 @@ void PluginHostEngine::processPlugins(juce::AudioBuffer<float>& buffer, juce::Mi
         auto& scratch = loaded.scratchBuffer;
         scratch.clear();
 
-        // Cada plugin recebe o MIDI já filtrado pelo estado de mute/solo dele
-        // (e, no futuro, por canal). Ver MidiRouter::route().
+        // Cada plugin recebe o MIDI já filtrado pelo estado de mute/solo/cena
+        // dele (e, no futuro, por canal). Ver MidiRouter::route().
         loaded.scratchMidi.clear();
-        MidiRouter::route(loaded.route, activeSoloCount > 0, midiMessages,
-                           buffer.getNumSamples(), loaded.scratchMidi);
+        MidiRouter::route(loaded.route, loaded.id, activeSceneId, activeSoloCount > 0,
+                           midiMessages, buffer.getNumSamples(), loaded.scratchMidi);
 
         loaded.instance->processBlock(scratch, loaded.scratchMidi);
         scratch.applyGain(loaded.volume);

@@ -25,6 +25,8 @@ private:
     void audioDeviceChanged() override;
     void pluginsChanged() override;
     void pluginRouteChanged(int pluginId) override;
+    void activeSceneChanged(int pluginId) override;
+    void midiLearnStateChanged() override;
 
     //== UI ====================================================================
     void showPreferences();

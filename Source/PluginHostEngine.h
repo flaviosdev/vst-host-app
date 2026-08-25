@@ -4,6 +4,7 @@
 #include <functional>
 #include <map>
 #include <vector>
+#include "MidiActionMap.h"
 #include "MidiRouter.h"
 #include "PresetManager.h"
 
@@ -28,6 +29,16 @@ public:
         // separado de pluginChanged() pra UI poder atualizar só o botão
         // daquele plugin, sem re-renderizar a linha inteira.
         virtual void pluginRouteChanged(int /*pluginId*/) {}
+
+        // Chamado quando a cena ativa muda (inclusive quando é desativada,
+        // com pluginId = -1). Diferente de pluginRouteChanged: afeta a
+        // aparência de TODAS as linhas de uma vez, não só uma.
+        virtual void activeSceneChanged(int /*pluginId*/) {}
+
+        // Chamado quando o modo de captura do MIDI Learn liga/desliga, ou
+        // quando um binding é aprendido/removido - a UI usa isso pra
+        // destacar o botão "Learn" e mostrar quais teclas já têm binding.
+        virtual void midiLearnStateChanged() {}
     };
 
     struct LoadResult
@@ -79,6 +90,35 @@ public:
     void setPluginMuted(int pluginId, bool shouldBeMuted);
     bool isPluginSolo(int pluginId) const;
     void setPluginSolo(int pluginId, bool shouldBeSolo);
+
+    //== Cena ativa =============================================================
+    // Modo de troca exclusiva pra uso ao vivo: quando uma cena está ativa,
+    // SÓ o plugin dela recebe MIDI (Note On) - todos os outros ficam mudos,
+    // ignorando o estado de mute/solo manual deles. Ativar outra cena troca
+    // na hora, sem acumular (ao contrário do solo, que é aditivo).
+    // -1 = nenhuma cena ativa (mute/solo manuais voltam a mandar).
+    void setActiveScene(int pluginId);
+    int getActiveScene() const noexcept { return activeSceneId; }
+    bool isSceneModeActive() const noexcept { return activeSceneId != -1; }
+
+    //== MIDI Learn =============================================================
+    // Liga o modo de captura: a próxima nota (Note On) recebida de QUALQUER
+    // dispositivo MIDI habilitado vira o gatilho pra essa ação, nesse plugin.
+    // Enquanto ativo, essa nota específica NÃO soa (é interceptada antes de
+    // chegar em qualquer plugin) - ela vira só um controle, igual um pad de
+    // controlador que só serve pra ligar/desligar algo.
+    void startMidiLearn(MidiTriggerAction action, int targetPluginId);
+    void cancelMidiLearn();
+    bool isMidiLearnActive() const noexcept { return midiActionMap.isLearning(); }
+
+    // true se ESTE botão específico (ação + plugin) foi quem iniciou a
+    // captura em andamento - usado pra manter só o botão certo "aceso"
+    // enquanto o host aguarda a tecla.
+    bool isMidiLearnTarget(MidiTriggerAction action, int pluginId) const;
+
+    // Bindings já aprendidos para um plugin (pra UI mostrar "Mute: Nota 36, Canal 10").
+    juce::Array<MidiTriggerBinding> getMidiBindingsForPlugin(int pluginId) const;
+    void clearMidiBinding(MidiTriggerAction action, int pluginId);
 
     juce::AudioProcessorEditor* createPluginEditorIfNeeded(int pluginId);
 
@@ -140,6 +180,15 @@ private:
     };
 
     void processPlugins(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages);
+
+    // Roda dentro de processPlugins(), na thread de áudio, com pluginListLock
+    // já adquirido. Filtra do buffer qualquer nota que esteja sendo aprendida
+    // ou que já dispara uma ação - essas notas nunca chegam nos plugins.
+    // Efeitos colaterais (aprender um binding, alternar mute/solo) são
+    // agendados via MessageManager::callAsync() para rodar na thread de
+    // mensagens depois - nunca mexe em Listener/UI direto da thread de áudio.
+    void interceptLearnableNotes(juce::MidiBuffer& midiMessages);
+
     void prepareLoadedPlugin(LoadedPlugin& loaded);
     LoadedPlugin* findPlugin(int pluginId) noexcept;
     const LoadedPlugin* findPlugin(int pluginId) const noexcept;
@@ -167,8 +216,10 @@ private:
     juce::CriticalSection pluginListLock;
     int nextPluginId = 1;
     int activeSoloCount = 0; // protegido por pluginListLock, igual a loadedPlugins
+    int activeSceneId = -1;  // protegido por pluginListLock; -1 = nenhuma cena ativa
 
     juce::ListenerList<Listener> listeners;
+    MidiActionMap midiActionMap; // protegido por pluginListLock, igual ao resto do estado de roteamento
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginHostEngine)
 };

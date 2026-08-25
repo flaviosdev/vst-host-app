@@ -25,6 +25,8 @@ namespace
 }
 
 void MidiRouter::route(const PluginMidiRoute& route,
+                        int pluginId,
+                        int activeSceneId,
                         bool anySoloActive,
                         const juce::MidiBuffer& source,
                         int numSamples,
@@ -32,12 +34,14 @@ void MidiRouter::route(const PluginMidiRoute& route,
 {
     juce::ignoreUnused(numSamples);
 
-    // Regra de silenciamento: um plugin fica mudo se
-    //   (a) ele está mutado diretamente, OU
-    //   (b) existe algum OUTRO plugin em solo, e este aqui não está em solo.
-    // Um plugin em solo sempre toca, independente do mute dele (solo tem
-    // prioridade - é o comportamento padrão em DAWs).
-    const bool shouldBeSilent = !route.solo && (route.muted || anySoloActive);
+    // Com uma cena ativa, ela manda sozinha: só o plugin da cena toca,
+    // ignorando mute/solo manuais (que continuam guardados, só "pausados"
+    // enquanto a cena estiver ativa - voltam a valer quando ela é desligada).
+    // Sem cena ativa, cai na regra de sempre: mutado, ou fora do solo ativo.
+    const bool sceneModeActive = activeSceneId != -1;
+    const bool shouldBeSilent = sceneModeActive
+        ? (pluginId != activeSceneId)
+        : (!route.solo && (route.muted || anySoloActive));
 
     for (const auto metadata : source)
     {

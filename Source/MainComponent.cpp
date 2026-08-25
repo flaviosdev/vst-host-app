@@ -61,11 +61,45 @@ public:
         muteButton.setToggleState(engine.isPluginMuted(pluginId), juce::dontSendNotification);
         muteButton.onClick = [this] { engine.setPluginMuted(pluginId, muteButton.getToggleState()); };
 
+        addAndMakeVisible(muteLearnButton);
+        muteLearnButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::red);
+        muteLearnButton.onClick = [this]
+        {
+            // Clicar de novo no mesmo Learn que já está aguardando cancela -
+            // é o jeito natural de desistir sem apertar tecla nenhuma.
+            if (engine.isMidiLearnTarget(MidiTriggerAction::toggleMute, pluginId))
+                engine.cancelMidiLearn();
+            else
+                engine.startMidiLearn(MidiTriggerAction::toggleMute, pluginId);
+        };
+
         addAndMakeVisible(soloButton);
         soloButton.setClickingTogglesState(true);
         soloButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::yellow);
         soloButton.setToggleState(engine.isPluginSolo(pluginId), juce::dontSendNotification);
         soloButton.onClick = [this] { engine.setPluginSolo(pluginId, soloButton.getToggleState()); };
+
+        addAndMakeVisible(soloLearnButton);
+        soloLearnButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::red);
+        soloLearnButton.onClick = [this]
+        {
+            if (engine.isMidiLearnTarget(MidiTriggerAction::toggleSolo, pluginId))
+                engine.cancelMidiLearn();
+            else
+                engine.startMidiLearn(MidiTriggerAction::toggleSolo, pluginId);
+        };
+
+        addAndMakeVisible(sceneButton);
+        sceneButton.setClickingTogglesState(true);
+        sceneButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::cyan);
+        sceneButton.setToggleState(engine.getActiveScene() == pluginId, juce::dontSendNotification);
+        sceneButton.onClick = [this]
+        {
+            // Um toggle exclusivo: se este plugin já era a cena ativa,
+            // desliga (-1); senão, esta vira a cena ativa (troca a
+            // anterior, não acumula - diferente do solo).
+            engine.setActiveScene(engine.getActiveScene() == pluginId ? -1 : pluginId);
+        };
 
         addAndMakeVisible(removeButton);
         removeButton.onClick = [this] { removePlugin(pluginId); };
@@ -147,6 +181,8 @@ public:
         deletePresetButton.setEnabled(hasPresets);
 
         refreshRoute();
+        refreshScene();
+        refreshMidiLearn();
     }
 
     // Só sincroniza os toggles de mute/solo (mais barato que refresh() inteiro).
@@ -157,6 +193,43 @@ public:
     {
         muteButton.setToggleState(engine.isPluginMuted(pluginId), juce::dontSendNotification);
         soloButton.setToggleState(engine.isPluginSolo(pluginId), juce::dontSendNotification);
+    }
+
+    // Sincroniza só o botão de Cena. Separado de refreshRoute() porque cena
+    // ativa é um conceito à parte de mute/solo manual (ver PluginHostEngine),
+    // e precisa ser chamado em TODAS as linhas sempre que a cena mudar,
+    // já que ativar uma cena desliga visualmente todas as outras.
+    void refreshScene()
+    {
+        sceneButton.setToggleState(engine.getActiveScene() == pluginId, juce::dontSendNotification);
+    }
+
+    // Sincroniza os botões de Learn: mostra se ESTE plugin/ação específico
+    // está aguardando uma tecla agora, e o texto do botão passa a mostrar
+    // a nota já vinculada (ex.: "Nota 36 / Ch10"), se houver. Precisa ser
+    // chamado em TODAS as linhas sempre que o estado de learn mudar, porque
+    // iniciar um learn em qualquer botão cancela visualmente todos os outros
+    // (só pode haver uma captura em andamento no host inteiro).
+    void refreshMidiLearn()
+    {
+        const auto bindings = engine.getMidiBindingsForPlugin(pluginId);
+
+        auto describe = [&bindings](MidiTriggerAction action) -> juce::String
+        {
+            for (const auto& binding : bindings)
+                if (binding.action == action)
+                    return "Nota " + juce::String(binding.noteNumber) + " / Ch" + juce::String(binding.midiChannel);
+            return "Learn";
+        };
+
+        const bool muteIsTarget = engine.isMidiLearnTarget(MidiTriggerAction::toggleMute, pluginId);
+        const bool soloIsTarget = engine.isMidiLearnTarget(MidiTriggerAction::toggleSolo, pluginId);
+
+        muteLearnButton.setToggleState(muteIsTarget, juce::dontSendNotification);
+        soloLearnButton.setToggleState(soloIsTarget, juce::dontSendNotification);
+
+        muteLearnButton.setButtonText(muteIsTarget ? "Aguardando..." : describe(MidiTriggerAction::toggleMute));
+        soloLearnButton.setButtonText(soloIsTarget ? "Aguardando..." : describe(MidiTriggerAction::toggleSolo));
     }
 
     int getPluginId() const noexcept { return pluginId; }
@@ -171,6 +244,15 @@ public:
         editorButton.setBounds(top.removeFromRight(170).reduced(2, 0));
         soloButton.setBounds(top.removeFromRight(50).reduced(2, 0));
         muteButton.setBounds(top.removeFromRight(50).reduced(2, 0));
+        sceneButton.setBounds(top.removeFromRight(55).reduced(2, 0));
+
+        area.removeFromTop(4);
+
+        auto learnRow = area.removeFromTop(24);
+        learnRow.removeFromLeft(220); // alinha embaixo de mute/solo, não do nome
+        muteLearnButton.setBounds(learnRow.removeFromLeft(110).reduced(2, 0));
+        learnRow.removeFromLeft(4);
+        soloLearnButton.setBounds(learnRow.removeFromLeft(110).reduced(2, 0));
 
         area.removeFromTop(6);
 
@@ -202,6 +284,9 @@ private:
     juce::TextButton removeButton { "Remover" };
     juce::TextButton muteButton { "Mute" };
     juce::TextButton soloButton { "Solo" };
+    juce::TextButton sceneButton { "Cena" };
+    juce::TextButton muteLearnButton { "Learn" };
+    juce::TextButton soloLearnButton { "Learn" };
 
     juce::Label factoryLabel;
     juce::ComboBox factoryBox;
@@ -324,6 +409,25 @@ void MainComponent::pluginRouteChanged(int)
     // clicados). O parâmetro pluginId não é usado por esse motivo.
     for (auto& row : pluginRows)
         row->refreshRoute();
+}
+
+void MainComponent::activeSceneChanged(int)
+{
+    // Mesma lógica do pluginRouteChanged: ativar uma cena precisa desligar
+    // visualmente o botão de Cena de todas as OUTRAS linhas, não só ligar
+    // a que foi clicada.
+    for (auto& row : pluginRows)
+        row->refreshScene();
+}
+
+void MainComponent::midiLearnStateChanged()
+{
+    // Mesmo motivo dos dois acima: iniciar uma captura em qualquer botão
+    // Learn precisa apagar visualmente o "Aguardando..." de todos os outros
+    // (só uma captura por vez no host inteiro), e aprender/remover um
+    // binding muda o texto do botão correspondente em qualquer linha.
+    for (auto& row : pluginRows)
+        row->refreshMidiLearn();
 }
 
 void MainComponent::refreshPluginList()
