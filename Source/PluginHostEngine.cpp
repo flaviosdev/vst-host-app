@@ -326,6 +326,9 @@ void PluginHostEngine::unloadPlugin(int pluginId)
         if (it == loadedPlugins.end())
             return;
 
+        if ((*it)->route.solo)
+            --activeSoloCount;
+
         (*it)->instance->releaseResources();
         loadedPlugins.erase(it);
     }
@@ -340,6 +343,7 @@ void PluginHostEngine::unloadPlugins()
         for (auto& loaded : loadedPlugins)
             loaded->instance->releaseResources();
         loadedPlugins.clear();
+        activeSoloCount = 0;
     }
 
     listeners.call([](Listener& l) { l.pluginChanged(); });
@@ -357,6 +361,51 @@ void PluginHostEngine::setPluginVolume(int pluginId, float volume)
     const juce::ScopedLock lock(pluginListLock);
     if (auto* loaded = findPlugin(pluginId))
         loaded->volume = juce::jlimit(0.0f, 2.0f, volume);
+}
+
+//==============================================================================
+bool PluginHostEngine::isPluginMuted(int pluginId) const
+{
+    const juce::ScopedLock lock(pluginListLock);
+    auto* loaded = findPlugin(pluginId);
+    return loaded != nullptr && loaded->route.muted;
+}
+
+void PluginHostEngine::setPluginMuted(int pluginId, bool shouldBeMuted)
+{
+    {
+        const juce::ScopedLock lock(pluginListLock);
+        auto* loaded = findPlugin(pluginId);
+        if (loaded == nullptr || loaded->route.muted == shouldBeMuted)
+            return;
+
+        loaded->route.muted = shouldBeMuted;
+    }
+
+    listeners.call([pluginId](Listener& l) { l.pluginRouteChanged(pluginId); });
+}
+
+bool PluginHostEngine::isPluginSolo(int pluginId) const
+{
+    const juce::ScopedLock lock(pluginListLock);
+    auto* loaded = findPlugin(pluginId);
+    return loaded != nullptr && loaded->route.solo;
+}
+
+void PluginHostEngine::setPluginSolo(int pluginId, bool shouldBeSolo)
+{
+    {
+        const juce::ScopedLock lock(pluginListLock);
+        auto* loaded = findPlugin(pluginId);
+        if (loaded == nullptr || loaded->route.solo == shouldBeSolo)
+            return;
+
+        loaded->route.solo = shouldBeSolo;
+        activeSoloCount += shouldBeSolo ? 1 : -1;
+        jassert(activeSoloCount >= 0);
+    }
+
+    listeners.call([pluginId](Listener& l) { l.pluginRouteChanged(pluginId); });
 }
 
 juce::AudioProcessorEditor* PluginHostEngine::createPluginEditorIfNeeded(int pluginId)
@@ -387,11 +436,11 @@ void PluginHostEngine::processPlugins(juce::AudioBuffer<float>& buffer, juce::Mi
         auto& scratch = loaded.scratchBuffer;
         scratch.clear();
 
-        // Cada plugin recebe uma cópia do MIDI original. Assim, se um plugin
-        // alterar o MidiBuffer durante o processamento, isso não muda o que
-        // os outros plugins recebem.
+        // Cada plugin recebe o MIDI já filtrado pelo estado de mute/solo dele
+        // (e, no futuro, por canal). Ver MidiRouter::route().
         loaded.scratchMidi.clear();
-        loaded.scratchMidi.addEvents(midiMessages, 0, buffer.getNumSamples(), 0);
+        MidiRouter::route(loaded.route, activeSoloCount > 0, midiMessages,
+                           buffer.getNumSamples(), loaded.scratchMidi);
 
         loaded.instance->processBlock(scratch, loaded.scratchMidi);
         scratch.applyGain(loaded.volume);

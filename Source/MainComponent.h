@@ -24,6 +24,7 @@ private:
     void pluginChanged() override;
     void audioDeviceChanged() override;
     void pluginsChanged() override;
+    void pluginRouteChanged(int pluginId) override;
 
     //== UI ====================================================================
     void showPreferences();

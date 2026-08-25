@@ -55,6 +55,18 @@ public:
         addAndMakeVisible(editorButton);
         editorButton.onClick = [this] { openEditor(pluginId); };
 
+        addAndMakeVisible(muteButton);
+        muteButton.setClickingTogglesState(true);
+        muteButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::orange);
+        muteButton.setToggleState(engine.isPluginMuted(pluginId), juce::dontSendNotification);
+        muteButton.onClick = [this] { engine.setPluginMuted(pluginId, muteButton.getToggleState()); };
+
+        addAndMakeVisible(soloButton);
+        soloButton.setClickingTogglesState(true);
+        soloButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::yellow);
+        soloButton.setToggleState(engine.isPluginSolo(pluginId), juce::dontSendNotification);
+        soloButton.onClick = [this] { engine.setPluginSolo(pluginId, soloButton.getToggleState()); };
+
         addAndMakeVisible(removeButton);
         removeButton.onClick = [this] { removePlugin(pluginId); };
 
@@ -133,7 +145,21 @@ public:
         presetBox.setEnabled(hasPresets);
         loadPresetButton.setEnabled(hasPresets);
         deletePresetButton.setEnabled(hasPresets);
+
+        refreshRoute();
     }
+
+    // Só sincroniza os toggles de mute/solo (mais barato que refresh() inteiro).
+    // Precisa ser chamado pra QUALQUER linha quando QUALQUER plugin muda de
+    // solo, porque ligar o solo de um plugin muda o resultado sonoro de todos
+    // os outros (mesmo que o estado deles não tenha mudado).
+    void refreshRoute()
+    {
+        muteButton.setToggleState(engine.isPluginMuted(pluginId), juce::dontSendNotification);
+        soloButton.setToggleState(engine.isPluginSolo(pluginId), juce::dontSendNotification);
+    }
+
+    int getPluginId() const noexcept { return pluginId; }
 
     void resized() override
     {
@@ -141,8 +167,10 @@ public:
 
         auto top = area.removeFromTop(30);
         nameLabel.setBounds(top.removeFromLeft(220));
-        editorButton.setBounds(top.removeFromRight(170).reduced(2, 0));
         removeButton.setBounds(top.removeFromRight(90).reduced(2, 0));
+        editorButton.setBounds(top.removeFromRight(170).reduced(2, 0));
+        soloButton.setBounds(top.removeFromRight(50).reduced(2, 0));
+        muteButton.setBounds(top.removeFromRight(50).reduced(2, 0));
 
         area.removeFromTop(6);
 
@@ -172,6 +200,8 @@ private:
     juce::Label nameLabel;
     juce::TextButton editorButton { "Abrir Interface" };
     juce::TextButton removeButton { "Remover" };
+    juce::TextButton muteButton { "Mute" };
+    juce::TextButton soloButton { "Solo" };
 
     juce::Label factoryLabel;
     juce::ComboBox factoryBox;
@@ -284,6 +314,16 @@ void MainComponent::audioDeviceChanged()
 void MainComponent::pluginsChanged()
 {
     refreshPluginList();
+}
+
+void MainComponent::pluginRouteChanged(int)
+{
+    // Sincroniza TODAS as linhas, não só a do plugin que mudou: ligar o
+    // solo de um plugin muda o que se ouve de todos os outros, então os
+    // botões deles também precisam refletir isso (mesmo sem terem sido
+    // clicados). O parâmetro pluginId não é usado por esse motivo.
+    for (auto& row : pluginRows)
+        row->refreshRoute();
 }
 
 void MainComponent::refreshPluginList()

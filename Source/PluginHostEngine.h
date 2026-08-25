@@ -4,6 +4,7 @@
 #include <functional>
 #include <map>
 #include <vector>
+#include "MidiRouter.h"
 #include "PresetManager.h"
 
 /**
@@ -22,6 +23,11 @@ public:
         virtual void pluginChanged() {}
         virtual void audioDeviceChanged() {}
         virtual void pluginsChanged() {}
+
+        // Chamado quando mute/solo/canal de um plugin específico muda -
+        // separado de pluginChanged() pra UI poder atualizar só o botão
+        // daquele plugin, sem re-renderizar a linha inteira.
+        virtual void pluginRouteChanged(int /*pluginId*/) {}
     };
 
     struct LoadResult
@@ -64,6 +70,16 @@ public:
     float getPluginVolume(int pluginId) const;
     void setPluginVolume(int pluginId, float volume);
 
+    //== Mute / Solo ===========================================================
+    // "Pseudo-mute": não corta o áudio já em processamento, apenas deixa de
+    // enviar MIDI pro plugin mutado (ver MidiRouter). Solo tem prioridade
+    // sobre mute: um plugin em solo sempre toca, mesmo que também esteja
+    // marcado como mutado.
+    bool isPluginMuted(int pluginId) const;
+    void setPluginMuted(int pluginId, bool shouldBeMuted);
+    bool isPluginSolo(int pluginId) const;
+    void setPluginSolo(int pluginId, bool shouldBeSolo);
+
     juce::AudioProcessorEditor* createPluginEditorIfNeeded(int pluginId);
 
     //== Programas de fábrica ================================================
@@ -88,8 +104,7 @@ private:
         double sampleRate = 44100.0;
         int blockSize = 512;
         float volume = 1.0f;
-
-        
+        PluginMidiRoute route;
     };
 
     class ParallelPluginProcessor : public juce::AudioProcessor
@@ -151,6 +166,7 @@ private:
     std::vector<std::unique_ptr<LoadedPlugin>> loadedPlugins;
     juce::CriticalSection pluginListLock;
     int nextPluginId = 1;
+    int activeSoloCount = 0; // protegido por pluginListLock, igual a loadedPlugins
 
     juce::ListenerList<Listener> listeners;
 
