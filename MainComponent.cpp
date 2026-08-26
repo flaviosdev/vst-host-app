@@ -51,9 +51,8 @@ public:
           tryGlobalLearn(std::move(tryGlobalLearnCallback))
     {
         addAndMakeVisible(nameLabel);
-        nameLabel.setJustificationType(juce::Justification::centredTop);
-        nameLabel.setFont(juce::Font(13.0f, juce::Font::bold));
-        nameLabel.setMinimumHorizontalScale(1.0f); // não encolhe a fonte, deixa o texto quebrar de linha
+        nameLabel.setJustificationType(juce::Justification::centredLeft);
+        nameLabel.setFont(juce::Font(16.0f, juce::Font::bold));
 
         addAndMakeVisible(editorButton);
         editorButton.onClick = [this] { openEditor(pluginId); };
@@ -144,8 +143,7 @@ public:
         removeButton.onClick = [this] { removePlugin(pluginId); };
 
         addAndMakeVisible(factoryLabel);
-        factoryLabel.setText("Fabrica:", juce::dontSendNotification);
-        factoryLabel.setFont(juce::Font(11.0f));
+        factoryLabel.setText("Programas de fabrica:", juce::dontSendNotification);
 
         addAndMakeVisible(factoryBox);
         factoryBox.onChange = [this]
@@ -157,12 +155,10 @@ public:
 
         addAndMakeVisible(presetLabel);
         presetLabel.setText("Presets:", juce::dontSendNotification);
-        presetLabel.setFont(juce::Font(11.0f));
 
         addAndMakeVisible(presetBox);
 
         addAndMakeVisible(savePresetButton);
-        savePresetButton.setButtonText("Salvar");
         savePresetButton.onClick = [this] { savePreset(pluginId); };
 
         addAndMakeVisible(loadPresetButton);
@@ -277,54 +273,44 @@ public:
         sceneLearnButton.setButtonText(sceneIsTarget ? "Aguardando..." : describe(MidiTriggerAction::activateScene));
     }
 
-    // Largura fixa de cada coluna - o container pai (ver MainComponent::
-    // refreshLoadedPlugins) usa esse mesmo valor pra posicionar as colunas
-    // lado a lado. Mudar aqui é a única coisa que precisa mudar pra ajustar
-    // a largura de todas as colunas de uma vez.
-    static constexpr int columnWidth = 120;
-
     int getPluginId() const noexcept { return pluginId; }
 
     void resized() override
     {
-        auto area = getLocalBounds().reduced(4);
+        auto area = getLocalBounds().reduced(8);
 
-        nameLabel.setBounds(area.removeFromTop(36));
+        auto top = area.removeFromTop(30);
+        nameLabel.setBounds(top.removeFromLeft(220));
+        removeButton.setBounds(top.removeFromRight(90).reduced(2, 0));
+        editorButton.setBounds(top.removeFromRight(170).reduced(2, 0));
+        soloButton.setBounds(top.removeFromRight(50).reduced(2, 0));
+        muteButton.setBounds(top.removeFromRight(50).reduced(2, 0));
+        sceneButton.setBounds(top.removeFromRight(55).reduced(2, 0));
+
         area.removeFromTop(4);
 
-        editorButton.setBounds(area.removeFromTop(26));
+        auto learnRow = area.removeFromTop(24);
+        learnRow.removeFromLeft(220); // alinha embaixo de mute/solo, não do nome
+        muteLearnButton.setBounds(learnRow.removeFromLeft(85).reduced(2, 0));
+        learnRow.removeFromLeft(4);
+        soloLearnButton.setBounds(learnRow.removeFromLeft(85).reduced(2, 0));
+        learnRow.removeFromLeft(4);
+        sceneLearnButton.setBounds(learnRow.removeFromLeft(85).reduced(2, 0));
+
         area.removeFromTop(6);
 
-        muteButton.setBounds(area.removeFromTop(24));
-        area.removeFromTop(2);
-        muteLearnButton.setBounds(area.removeFromTop(20));
+        auto factoryRow = area.removeFromTop(28);
+        factoryLabel.setBounds(factoryRow.removeFromLeft(120));
+        factoryBox.setBounds(factoryRow);
+
         area.removeFromTop(6);
 
-        soloButton.setBounds(area.removeFromTop(24));
-        area.removeFromTop(2);
-        soloLearnButton.setBounds(area.removeFromTop(20));
-        area.removeFromTop(6);
-
-        sceneButton.setBounds(area.removeFromTop(24));
-        area.removeFromTop(2);
-        sceneLearnButton.setBounds(area.removeFromTop(20));
-        area.removeFromTop(10);
-
-        factoryLabel.setBounds(area.removeFromTop(16));
-        factoryBox.setBounds(area.removeFromTop(24));
-        area.removeFromTop(10);
-
-        presetLabel.setBounds(area.removeFromTop(16));
-        presetBox.setBounds(area.removeFromTop(24));
-        area.removeFromTop(2);
-        savePresetButton.setBounds(area.removeFromTop(22));
-        area.removeFromTop(2);
-        loadPresetButton.setBounds(area.removeFromTop(22));
-        area.removeFromTop(2);
-        deletePresetButton.setBounds(area.removeFromTop(22));
-        area.removeFromTop(10);
-
-        removeButton.setBounds(area.removeFromTop(24));
+        auto presetRow = area.removeFromTop(28);
+        presetLabel.setBounds(presetRow.removeFromLeft(60));
+        deletePresetButton.setBounds(presetRow.removeFromRight(75).reduced(2, 0));
+        loadPresetButton.setBounds(presetRow.removeFromRight(75).reduced(2, 0));
+        savePresetButton.setBounds(presetRow.removeFromRight(90).reduced(2, 0));
+        presetBox.setBounds(presetRow);
     }
 
 private:
@@ -390,7 +376,7 @@ MainComponent::MainComponent()
 
     addAndMakeVisible(loadedPluginsViewport);
     loadedPluginsViewport.setViewedComponent(&loadedPluginsContainer, false);
-    loadedPluginsViewport.setScrollBarsShown(false, true); // rolagem horizontal, não vertical
+    loadedPluginsViewport.setScrollBarsShown(true, false);
 
     statusLabel.setJustificationType(juce::Justification::centredLeft);
     statusLabel.setColour(juce::Label::textColourId, juce::Colours::lightgreen);
@@ -440,27 +426,21 @@ void MainComponent::resized()
     auto loadedLabelArea = area.removeFromTop(24);
     loadedLabelArea.removeFromLeft(4);
 
-    loadedPluginsViewport.setBounds(area.removeFromTop(520));
+    loadedPluginsViewport.setBounds(area.removeFromTop(290));
     area.removeFromTop(8);
 
     statusLabel.setBounds(area.removeFromBottom(24));
 
-    // Cada plugin agora é uma coluna estreita e alta (estilo mixer de DAW),
-    // lado a lado, em vez de uma linha larga empilhada verticalmente. Isso
-    // é o que permite ver 6-8 plugins de uma vez rolando na horizontal, em
-    // vez de rolar na vertical pra achar o plugin que você quer.
-    const int columnWidth = PluginRowComponent::columnWidth;
-    const int columnGap = 6;
-    const int totalWidth = (columnWidth + columnGap) * (int) pluginRows.size();
+    const int rowHeight = 140;
+    loadedPluginsContainer.setSize(loadedPluginsViewport.getMaximumVisibleWidth(),
+                                   juce::jmax(rowHeight * (int) pluginRows.size(),
+                                              loadedPluginsViewport.getHeight()));
 
-    loadedPluginsContainer.setSize(juce::jmax(totalWidth, loadedPluginsViewport.getMaximumVisibleWidth()),
-                                   loadedPluginsViewport.getHeight());
-
-    int x = 0;
+    int y = 0;
     for (auto& row : pluginRows)
     {
-        row->setBounds(x, 0, columnWidth, loadedPluginsContainer.getHeight());
-        x += columnWidth + columnGap;
+        row->setBounds(0, y, loadedPluginsContainer.getWidth(), rowHeight);
+        y += rowHeight;
     }
 }
 

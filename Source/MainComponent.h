@@ -38,6 +38,12 @@ private:
     void savePresetForPlugin(int pluginId);
     void setStatus(const juce::String& message);
 
+    // Chamado pelo botão Mute/Solo de QUALQUER linha ao ser clicado, pra
+    // saber se esse clique deve ser interpretado como "escolher este
+    // controle pro MIDI Learn global" em vez de mutar/solar de verdade.
+    // Retorna true se consumiu o clique (e já iniciou a captura na Engine).
+    bool tryStartLearnFromGlobalArm(MidiTriggerAction action, int pluginId);
+
     //== Model =================================================================
     PluginHostEngine engine;
 
@@ -47,11 +53,18 @@ private:
     std::map<int, std::unique_ptr<juce::DocumentWindow>> pluginEditorWindows;
     std::vector<std::unique_ptr<PluginRowComponent>> pluginRows;
 
+    // true entre clicar no botão global "Learn" e escolher um controle
+    // (Mute/Solo de algum plugin) clicando nele - estado puramente de UI,
+    // não vive na Engine porque ela só sabe lidar com "aguardar uma tecla
+    // para esta ação+plugin específicos" (ver PluginHostEngine::startMidiLearn).
+    bool globalLearnArmed = false;
+
     //== Widgets ================================================================
     juce::TextButton audioSettingsButton { "Preferencias..." };
     juce::ListBox pluginList;
     std::unique_ptr<juce::ListBoxModel> pluginListModel;
     juce::TextButton loadPluginButton { "Carregar Plugin Selecionado" };
+    juce::TextButton globalLearnButton { "Learn" };
     juce::Label statusLabel;
     juce::Viewport loadedPluginsViewport;
     juce::Component loadedPluginsContainer;
