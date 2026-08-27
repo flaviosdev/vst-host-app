@@ -5,7 +5,8 @@ namespace
 class PluginListModel : public juce::ListBoxModel
 {
 public:
-    explicit PluginListModel(PluginHostEngine& engineToUse) : engine(engineToUse) {}
+    PluginListModel(PluginHostEngine& engineToUse, std::function<void(int)> doubleClickCallback)
+        : engine(engineToUse), onDoubleClick(std::move(doubleClickCallback)) {}
 
     int getNumRows() override { return engine.getKnownPlugins().size(); }
 
@@ -23,8 +24,15 @@ public:
                    8, 0, width - 16, height, juce::Justification::centredLeft);
     }
 
+    void listBoxItemDoubleClicked(int row, const juce::MouseEvent&) override
+    {
+        if (onDoubleClick)
+            onDoubleClick(row);
+    }
+
 private:
     PluginHostEngine& engine;
+    std::function<void(int)> onDoubleClick;
 };
 }
 
@@ -41,14 +49,16 @@ public:
                        std::function<void(int)> removeCallback,
                        std::function<void(int)> savePresetCallback,
                        std::function<void(const juce::String&)> statusCallback,
-                       std::function<bool(MidiTriggerAction, int)> tryGlobalLearnCallback)
+                       std::function<bool(MidiTriggerAction, int)> tryGlobalLearnCallback,
+                       std::function<bool(int)> tryGlobalVolumeLearnCallback)
         : engine(engineToUse),
           pluginId(pluginIdToUse),
           openEditor(std::move(openEditorCallback)),
           removePlugin(std::move(removeCallback)),
           savePreset(std::move(savePresetCallback)),
           setStatus(std::move(statusCallback)),
-          tryGlobalLearn(std::move(tryGlobalLearnCallback))
+          tryGlobalLearn(std::move(tryGlobalLearnCallback)),
+          tryGlobalVolumeLearn(std::move(tryGlobalVolumeLearnCallback))
     {
         addAndMakeVisible(nameLabel);
         nameLabel.setJustificationType(juce::Justification::centredTop);
@@ -143,6 +153,42 @@ public:
         addAndMakeVisible(removeButton);
         removeButton.onClick = [this] { removePlugin(pluginId); };
 
+        addAndMakeVisible(volumeSlider);
+        volumeSlider.setSliderStyle(juce::Slider::LinearVertical);
+        volumeSlider.setTextBoxStyle(juce::Slider::TextBoxBelow, false, 40, 18);
+        volumeSlider.setRange(0.0, 2.0, 0.01);
+        volumeSlider.setDoubleClickReturnValue(true, 1.0); // duplo clique reseta pra 100%
+        volumeSlider.setValue(engine.getPluginVolume(pluginId), juce::dontSendNotification);
+
+        // onDragStart, não onValueChange: um slider dispara onValueChange a
+        // cada pixel arrastado, então é o primeiro toque (início do arrasto)
+        // que representa "o usuário escolheu este controle" pro Learn global -
+        // onValueChange continua existindo só pra mover o volume de verdade.
+        volumeSlider.onDragStart = [this]
+        {
+            if (tryGlobalVolumeLearn(pluginId))
+            {
+                // Devolve o slider pro valor atual (desfaz qualquer arrasto
+                // que já tenha mexido, já que esse gesto não era pra
+                // ajustar volume - era só a escolha do controle a aprender).
+                volumeSlider.setValue(engine.getPluginVolume(pluginId), juce::dontSendNotification);
+            }
+        };
+        volumeSlider.onValueChange = [this]
+        {
+            engine.setPluginVolume(pluginId, (float) volumeSlider.getValue());
+        };
+
+        addAndMakeVisible(volumeLearnButton);
+        volumeLearnButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::red);
+        volumeLearnButton.onClick = [this]
+        {
+            if (engine.isVolumeMidiLearnTarget(pluginId))
+                engine.cancelMidiLearn();
+            else
+                engine.startVolumeMidiLearn(pluginId);
+        };
+
         addAndMakeVisible(factoryLabel);
         factoryLabel.setText("Fabrica:", juce::dontSendNotification);
         factoryLabel.setFont(juce::Font(11.0f));
@@ -222,6 +268,8 @@ public:
         loadPresetButton.setEnabled(hasPresets);
         deletePresetButton.setEnabled(hasPresets);
 
+        volumeSlider.setValue(engine.getPluginVolume(pluginId), juce::dontSendNotification);
+
         refreshRoute();
         refreshScene();
         refreshMidiLearn();
@@ -235,6 +283,7 @@ public:
     {
         muteButton.setToggleState(engine.isPluginMuted(pluginId), juce::dontSendNotification);
         soloButton.setToggleState(engine.isPluginSolo(pluginId), juce::dontSendNotification);
+        volumeSlider.setValue(engine.getPluginVolume(pluginId), juce::dontSendNotification);
     }
 
     // Sincroniza só o botão de Cena. Separado de refreshRoute() porque cena
@@ -275,19 +324,35 @@ public:
         muteLearnButton.setButtonText(muteIsTarget ? "Aguardando..." : describe(MidiTriggerAction::toggleMute));
         soloLearnButton.setButtonText(soloIsTarget ? "Aguardando..." : describe(MidiTriggerAction::toggleSolo));
         sceneLearnButton.setButtonText(sceneIsTarget ? "Aguardando..." : describe(MidiTriggerAction::activateScene));
+
+        const bool volumeIsTarget = engine.isVolumeMidiLearnTarget(pluginId);
+        volumeLearnButton.setToggleState(volumeIsTarget, juce::dontSendNotification);
+
+        const auto volumeBindingDescription = engine.getVolumeMidiBindingDescription(pluginId);
+        volumeLearnButton.setButtonText(volumeIsTarget
+                                             ? "Aguardando..."
+                                             : (volumeBindingDescription.isNotEmpty() ? volumeBindingDescription : "Learn"));
     }
 
     // Largura fixa de cada coluna - o container pai (ver MainComponent::
     // refreshLoadedPlugins) usa esse mesmo valor pra posicionar as colunas
     // lado a lado. Mudar aqui é a única coisa que precisa mudar pra ajustar
     // a largura de todas as colunas de uma vez.
-    static constexpr int columnWidth = 120;
+    static constexpr int columnWidth = 150; // 120 + espaço do slider de volume vertical
 
     int getPluginId() const noexcept { return pluginId; }
 
     void resized() override
     {
         auto area = getLocalBounds().reduced(4);
+
+        // Reserva a faixa da direita para o slider de volume antes de tudo -
+        // ele ocupa, verticalmente, exatamente do topo do botão Cena até o
+        // fundo do botão Remover (calculado abaixo, depois que os dois
+        // existirem). Horizontalmente, fica numa coluna estreita à direita,
+        // encolhendo a área disponível pros outros controles.
+        auto volumeColumn = area.removeFromRight(28);
+        area.removeFromRight(4); // respiro entre os controles e o slider
 
         nameLabel.setBounds(area.removeFromTop(36));
         area.removeFromTop(4);
@@ -304,6 +369,8 @@ public:
         area.removeFromTop(2);
         soloLearnButton.setBounds(area.removeFromTop(20));
         area.removeFromTop(6);
+
+        const int sceneTop = area.getY(); // topo do botão Cena - início da faixa do slider
 
         sceneButton.setBounds(area.removeFromTop(24));
         area.removeFromTop(2);
@@ -325,6 +392,19 @@ public:
         area.removeFromTop(10);
 
         removeButton.setBounds(area.removeFromTop(24));
+
+        const int sceneToRemoveBottom = removeButton.getBottom(); // fundo do Remover - fim da faixa do slider
+
+        // Slider vertical ocupando a faixa toda, exceto os últimos 24px
+        // reservados pro botão Learn dele logo abaixo - a faixa total
+        // (topo do Cena até fundo do Remover) continua sendo a pedida;
+        // ela só é dividida entre o slider e o botão Learn dele.
+        const int volumeLearnHeight = 24;
+        volumeSlider.setBounds(volumeColumn.getX(), sceneTop,
+                               volumeColumn.getWidth(),
+                               (sceneToRemoveBottom - sceneTop) - volumeLearnHeight - 4);
+        volumeLearnButton.setBounds(volumeColumn.getX(), sceneToRemoveBottom - volumeLearnHeight,
+                                    volumeColumn.getWidth(), volumeLearnHeight);
     }
 
 private:
@@ -336,10 +416,13 @@ private:
     std::function<void(int)> savePreset;
     std::function<void(const juce::String&)> setStatus;
     std::function<bool(MidiTriggerAction, int)> tryGlobalLearn;
+    std::function<bool(int)> tryGlobalVolumeLearn;
 
     juce::Label nameLabel;
     juce::TextButton editorButton { "Abrir Interface" };
     juce::TextButton removeButton { "Remover" };
+    juce::Slider volumeSlider;
+    juce::TextButton volumeLearnButton { "Learn" };
     juce::TextButton muteButton { "Mute" };
     juce::TextButton soloButton { "Solo" };
     juce::TextButton sceneButton { "Cena" };
@@ -368,7 +451,7 @@ MainComponent::MainComponent()
     audioSettingsButton.onClick = [this] { showPreferences(); };
 
     addAndMakeVisible(pluginList);
-    pluginListModel = std::make_unique<PluginListModel>(engine);
+    pluginListModel = std::make_unique<PluginListModel>(engine, [this](int) { loadSelectedPlugin(); });
     pluginList.setModel(pluginListModel.get());
     pluginList.setRowHeight(28);
 
@@ -537,6 +620,19 @@ bool MainComponent::tryStartLearnFromGlobalArm(MidiTriggerAction action, int plu
     return true;
 }
 
+bool MainComponent::tryStartVolumeLearnFromGlobalArm(int pluginId)
+{
+    if (!globalLearnArmed)
+        return false;
+
+    globalLearnArmed = false;
+    globalLearnButton.setToggleState(false, juce::dontSendNotification);
+
+    engine.startVolumeMidiLearn(pluginId);
+    setStatus("MIDI Learn: mexa o fader/botao de controle agora.");
+    return true;
+}
+
 void MainComponent::refreshPluginList()
 {
     pluginList.updateContent();
@@ -574,7 +670,8 @@ void MainComponent::refreshLoadedPlugins()
             },
             [this](int id) { savePresetForPlugin(id); },
             [this](const juce::String& message) { setStatus(message); },
-            [this](MidiTriggerAction action, int id) { return tryStartLearnFromGlobalArm(action, id); });
+            [this](MidiTriggerAction action, int id) { return tryStartLearnFromGlobalArm(action, id); },
+            [this](int id) { return tryStartVolumeLearnFromGlobalArm(id); });
 
         loadedPluginsContainer.addAndMakeVisible(row.get());
         pluginRows.push_back(std::move(row));

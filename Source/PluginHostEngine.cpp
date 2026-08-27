@@ -341,8 +341,10 @@ void PluginHostEngine::unloadPlugin(int pluginId)
         (*it)->instance->releaseResources();
         loadedPlugins.erase(it);
 
-        pluginHadBindings = !midiActionMap.getBindingsForPlugin(pluginId).isEmpty();
+        pluginHadBindings = !midiActionMap.getBindingsForPlugin(pluginId).isEmpty()
+                          || midiCcMap.getBindingForPlugin(pluginId) != nullptr;
         midiActionMap.removeBindingsForPlugin(pluginId);
+        midiCcMap.removeBindingsForPlugin(pluginId);
     }
 
     listeners.call([](Listener& l) { l.pluginChanged(); });
@@ -367,6 +369,7 @@ void PluginHostEngine::unloadPlugins()
         activeSoloCount = 0;
         activeSceneId = -1;
         midiActionMap.clearAll();
+        midiCcMap.clearAll();
     }
 
     listeners.call([](Listener& l) { l.pluginChanged(); });
@@ -383,9 +386,20 @@ float PluginHostEngine::getPluginVolume(int pluginId) const
 
 void PluginHostEngine::setPluginVolume(int pluginId, float volume)
 {
-    const juce::ScopedLock lock(pluginListLock);
-    if (auto* loaded = findPlugin(pluginId))
+    {
+        const juce::ScopedLock lock(pluginListLock);
+        auto* loaded = findPlugin(pluginId);
+        if (loaded == nullptr)
+            return;
+
         loaded->volume = juce::jlimit(0.0f, 2.0f, volume);
+    }
+
+    // Notifica pra UI poder sincronizar o slider quando o volume muda "de
+    // fora" (via CC de um controlador), não só quando o próprio slider é
+    // arrastado. Reaproveita pluginRouteChanged - mesmo evento genérico
+    // "algo do roteamento/controle deste plugin mudou".
+    listeners.call([pluginId](Listener& l) { l.pluginRouteChanged(pluginId); });
 }
 
 //==============================================================================
@@ -459,6 +473,7 @@ void PluginHostEngine::startMidiLearn(MidiTriggerAction action, int targetPlugin
 {
     {
         const juce::ScopedLock lock(pluginListLock);
+        midiCcMap.cancelLearning(); // só uma captura por vez no host inteiro
         midiActionMap.startLearning(action, targetPluginId);
     }
 
@@ -469,10 +484,11 @@ void PluginHostEngine::cancelMidiLearn()
 {
     {
         const juce::ScopedLock lock(pluginListLock);
-        if (!midiActionMap.isLearning())
+        if (!midiActionMap.isLearning() && !midiCcMap.isLearning())
             return;
 
         midiActionMap.cancelLearning();
+        midiCcMap.cancelLearning();
     }
 
     listeners.call([](Listener& l) { l.midiLearnStateChanged(); });
@@ -484,6 +500,42 @@ bool PluginHostEngine::isMidiLearnTarget(MidiTriggerAction action, int pluginId)
     return midiActionMap.isLearning()
         && midiActionMap.getPendingAction() == action
         && midiActionMap.getPendingPluginId() == pluginId;
+}
+
+void PluginHostEngine::startVolumeMidiLearn(int targetPluginId)
+{
+    {
+        const juce::ScopedLock lock(pluginListLock);
+        midiActionMap.cancelLearning(); // só uma captura por vez no host inteiro
+        midiCcMap.startLearning(targetPluginId);
+    }
+
+    listeners.call([](Listener& l) { l.midiLearnStateChanged(); });
+}
+
+bool PluginHostEngine::isVolumeMidiLearnTarget(int pluginId) const
+{
+    const juce::ScopedLock lock(pluginListLock);
+    return midiCcMap.isLearning() && midiCcMap.getPendingPluginId() == pluginId;
+}
+
+juce::String PluginHostEngine::getVolumeMidiBindingDescription(int pluginId) const
+{
+    const juce::ScopedLock lock(pluginListLock);
+    if (const auto* binding = midiCcMap.getBindingForPlugin(pluginId))
+        return "CC " + juce::String(binding->ccNumber) + " / Ch" + juce::String(binding->midiChannel);
+
+    return {};
+}
+
+void PluginHostEngine::clearVolumeMidiBinding(int pluginId)
+{
+    {
+        const juce::ScopedLock lock(pluginListLock);
+        midiCcMap.removeBindingsForPlugin(pluginId);
+    }
+
+    listeners.call([](Listener& l) { l.midiLearnStateChanged(); });
 }
 
 juce::Array<MidiTriggerBinding> PluginHostEngine::getMidiBindingsForPlugin(int pluginId) const
@@ -523,7 +575,10 @@ void PluginHostEngine::interceptLearnableNotes(juce::MidiBuffer& midiMessages)
 {
     // Fora da thread de áudio isso seria só "if (bindings vazio) return",
     // mas aqui rodamos a cada bloco - então esse atalho importa de verdade.
-    if (!midiActionMap.isLearning() && !midiActionMap.hasAnyBindings())
+    const bool anyActionActivity = midiActionMap.isLearning() || midiActionMap.hasAnyBindings();
+    const bool anyCcActivity = midiCcMap.isLearning() || midiCcMap.hasAnyBindings();
+
+    if (!anyActionActivity && !anyCcActivity)
         return;
 
     juce::MidiBuffer filtered;
@@ -531,6 +586,46 @@ void PluginHostEngine::interceptLearnableNotes(juce::MidiBuffer& midiMessages)
     for (const auto metadata : midiMessages)
     {
         const auto message = metadata.getMessage();
+
+        if (message.isController())
+        {
+            const int ccNumber = message.getControllerNumber();
+            const int ccValue = message.getControllerValue(); // 0-127
+            const int channel = message.getChannel();
+
+            // Modo de captura de volume: o primeiro CC recebido vira o
+            // binding e nunca chega em nenhum plugin - a partir daqui só
+            // controla volume.
+            if (midiCcMap.isLearning())
+            {
+                if (midiCcMap.learnFrom(ccNumber, channel))
+                {
+                    juce::MessageManager::callAsync([this]
+                    {
+                        listeners.call([](Listener& l) { l.midiLearnStateChanged(); });
+                    });
+                    continue; // consumido - não passa pro filtered
+                }
+            }
+
+            // CC já vinculado a um plugin: nunca chega no plugin como CC
+            // "de verdade" (evita que o plugin também reaja a ele por conta
+            // própria); em vez disso empurra o volume direto. Escala 0-127
+            // pra 0.0-2.0 sem distinguir se veio de um fader ou de um botão
+            // que só manda 0/127 - de propósito, pra manter isso simples.
+            if (const auto* binding = midiCcMap.findBinding(ccNumber, channel))
+            {
+                const auto pluginId = binding->targetPluginId;
+                const float volume = (ccValue / 127.0f) * 2.0f;
+
+                juce::MessageManager::callAsync([this, pluginId, volume]
+                {
+                    setPluginVolume(pluginId, volume);
+                });
+
+                continue; // consumido - não passa pro filtered
+            }
+        }
 
         if (message.isNoteOn() || message.isNoteOff())
         {

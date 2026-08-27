@@ -43,6 +43,7 @@ private:
     // controle pro MIDI Learn global" em vez de mutar/solar de verdade.
     // Retorna true se consumiu o clique (e já iniciou a captura na Engine).
     bool tryStartLearnFromGlobalArm(MidiTriggerAction action, int pluginId);
+    bool tryStartVolumeLearnFromGlobalArm(int pluginId);
 
     //== Model =================================================================
     PluginHostEngine engine;

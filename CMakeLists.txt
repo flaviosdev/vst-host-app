@@ -66,6 +66,7 @@ target_sources(VSTHostApp PRIVATE
     Source/MidiRouter.cpp
     Source/MidiActionMap.cpp
     Source/MidiRouter.cpp
+    Source/MidiCcMap.cpp
 )
 
 # Gera o arquivo JuceHeader.h (usado pelos #include <JuceHeader.h> no código)
