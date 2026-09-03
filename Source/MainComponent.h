@@ -69,6 +69,7 @@ private:
     juce::Label statusLabel;
     juce::Viewport loadedPluginsViewport;
     juce::Component loadedPluginsContainer;
+    juce::MidiKeyboardComponent virtualKeyboard;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };

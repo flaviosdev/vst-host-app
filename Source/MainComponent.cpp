@@ -444,8 +444,13 @@ private:
 
 //==============================================================================
 MainComponent::MainComponent()
+    : virtualKeyboard(engine.getVirtualKeyboardState(), juce::MidiKeyboardComponent::horizontalKeyboard)
 {
     engine.addListener(this);
+
+    addAndMakeVisible(virtualKeyboard);
+    virtualKeyboard.setAvailableRange(36, 96); // C2 a C7 - faixa generosa pra maioria dos usos
+    virtualKeyboard.setOctaveForMiddleC(4);
 
     addAndMakeVisible(audioSettingsButton);
     audioSettingsButton.onClick = [this] { showPreferences(); };
@@ -523,10 +528,17 @@ void MainComponent::resized()
     auto loadedLabelArea = area.removeFromTop(24);
     loadedLabelArea.removeFromLeft(4);
 
+    statusLabel.setBounds(area.removeFromBottom(24));
+    area.removeFromBottom(4);
+
+    // Teclado virtual: fixo embaixo, largura total, altura suficiente pra
+    // ser clicável com conforto. Fica sempre visível, abaixo da área rolável
+    // de plugins - assim dá pra tocar mesmo com muitas colunas abertas.
+    virtualKeyboard.setBounds(area.removeFromBottom(90));
+    area.removeFromBottom(8);
+
     loadedPluginsViewport.setBounds(area.removeFromTop(520));
     area.removeFromTop(8);
-
-    statusLabel.setBounds(area.removeFromBottom(24));
 
     // Cada plugin agora é uma coluna estreita e alta (estilo mixer de DAW),
     // lado a lado, em vez de uma linha larga empilhada verticalmente. Isso

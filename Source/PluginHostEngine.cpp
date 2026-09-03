@@ -31,6 +31,12 @@ void PluginHostEngine::ParallelPluginProcessor::releaseResources()
 void PluginHostEngine::ParallelPluginProcessor::processBlock(juce::AudioBuffer<float>& buffer,
                                                                juce::MidiBuffer& midiMessages)
 {
+    // Mescla as notas do teclado virtual (cliques na tela) no mesmo buffer
+    // que já carrega o MIDI de hardware, na posição temporal certa dentro
+    // do bloco. A partir daqui os dois são indistinguíveis - atravessam o
+    // mesmo MidiRouter, mute/solo/cena e MIDI Learn como se fossem um só.
+    owner.virtualKeyboardState.processNextMidiBuffer(midiMessages, 0, buffer.getNumSamples(), true);
+
     owner.processPlugins(buffer, midiMessages);
 }
 
