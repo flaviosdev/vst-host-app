@@ -3,6 +3,7 @@
 #include <JuceHeader.h>
 #include <functional>
 #include <map>
+#include <set>
 #include <vector>
 #include "PluginHostEngine.h"
 #include "PreferencesWindow.h"
@@ -16,6 +17,7 @@ public:
 
     void paint(juce::Graphics&) override;
     void resized() override;
+    bool keyStateChanged(bool isKeyDown) override;
 
 private:
     class PluginRowComponent;
@@ -59,6 +61,11 @@ private:
     // não vive na Engine porque ela só sabe lidar com "aguardar uma tecla
     // para esta ação+plugin específicos" (ver PluginHostEngine::startMidiLearn).
     bool globalLearnArmed = false;
+
+    // Rastreia quais teclas do computador estão pressionadas agora, pra
+    // keyStateChanged() saber distinguir "acabou de apertar" (dispara Note
+    // On) de "acabou de soltar" (dispara Note Off) - ver getComputerKeyboardOffsets().
+    std::set<juce::juce_wchar> computerKeysCurrentlyDown;
 
     //== Widgets ================================================================
     juce::TextButton audioSettingsButton { "Preferencias..." };

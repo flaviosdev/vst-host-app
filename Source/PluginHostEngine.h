@@ -5,6 +5,7 @@
 #include <map>
 #include <vector>
 #include "MidiActionMap.h"
+#include "MidiCcMap.h"
 #include "MidiRouter.h"
 #include "PresetManager.h"
 
@@ -58,6 +59,14 @@ public:
     juce::AudioDeviceManager& getDeviceManager() noexcept { return deviceManager; }
     void saveAudioDeviceState();
 
+    //== Teclado virtual =======================================================
+    // Estado compartilhado com o juce::MidiKeyboardComponent da UI: cliques
+    // no teclado desenhado na tela viram Note On/Note Off aqui, e são
+    // injetados no mesmo processBlock que recebe o MIDI de hardware -
+    // atravessando o MidiRouter, mute/solo/cena e o MIDI Learn normalmente,
+    // porque entram no fluxo antes de qualquer uma dessas etapas.
+    juce::MidiKeyboardState& getVirtualKeyboardState() noexcept { return virtualKeyboardState; }
+
     //== Catálogo de plugins ==================================================
     juce::StringArray getPluginSearchPaths() const;
     void addPluginSearchPath(const juce::File& directory);
@@ -109,7 +118,7 @@ public:
     // controlador que só serve pra ligar/desligar algo.
     void startMidiLearn(MidiTriggerAction action, int targetPluginId);
     void cancelMidiLearn();
-    bool isMidiLearnActive() const noexcept { return midiActionMap.isLearning(); }
+    bool isMidiLearnActive() const noexcept { return midiActionMap.isLearning() || midiCcMap.isLearning(); }
 
     // true se ESTE botão específico (ação + plugin) foi quem iniciou a
     // captura em andamento - usado pra manter só o botão certo "aceso"
@@ -119,6 +128,18 @@ public:
     // Bindings já aprendidos para um plugin (pra UI mostrar "Mute: Nota 36, Canal 10").
     juce::Array<MidiTriggerBinding> getMidiBindingsForPlugin(int pluginId) const;
     void clearMidiBinding(MidiTriggerAction action, int pluginId);
+
+    //== MIDI Learn do volume (CC) =============================================
+    // Mesmo mecanismo do MIDI Learn de ações, mas pra volume: a próxima
+    // mensagem de Control Change recebida vira o binding, e a partir daí
+    // esse CC empurra o volume direto, sem passar por Mute/Solo/Cena.
+    void startVolumeMidiLearn(int targetPluginId);
+    bool isVolumeMidiLearnTarget(int pluginId) const;
+
+    // Descrição do binding de volume de um plugin, se houver ("CC 7 / Ch1").
+    // juce::String vazia se não houver binding.
+    juce::String getVolumeMidiBindingDescription(int pluginId) const;
+    void clearVolumeMidiBinding(int pluginId);
 
     juce::AudioProcessorEditor* createPluginEditorIfNeeded(int pluginId);
 
@@ -209,6 +230,7 @@ private:
     ParallelPluginProcessor parallelProcessor;
     juce::AudioDeviceManager deviceManager;
     juce::AudioProcessorPlayer audioProcessorPlayer;
+    juce::MidiKeyboardState virtualKeyboardState;
     juce::AudioPluginFormatManager formatManager;
     juce::KnownPluginList knownPluginList;
     juce::StringArray pluginSearchPaths;
@@ -220,6 +242,7 @@ private:
 
     juce::ListenerList<Listener> listeners;
     MidiActionMap midiActionMap; // protegido por pluginListLock, igual ao resto do estado de roteamento
+    MidiCcMap midiCcMap;         // idem, mas para o CC de volume
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(PluginHostEngine)
 };

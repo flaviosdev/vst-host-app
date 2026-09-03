@@ -2,6 +2,33 @@
 
 namespace
 {
+// Layout ABNT2: duas linhas do teclado do computador mapeadas cromaticamente
+// para notas MIDI, começando em C2 na tecla "\". A tecla "q" da segunda
+// linha toca a mesma nota que "m" da primeira - as duas linhas se completam
+// numa escala cromática contínua de C2 até F#4.
+//
+// O deslocamento é relativo a C2; a nota MIDI final é computerKeyboardBaseNote
+// (36 = C2, considerando setOctaveForMiddleC(4)) + esse deslocamento.
+const std::vector<std::pair<juce::juce_wchar, int>>& getComputerKeyboardOffsets()
+{
+    static const std::vector<std::pair<juce::juce_wchar, int>> table = {
+        // Linha 1: \azsxcfvgbhnmk,l.;  (C2 até F3)
+        { '\\', 0 }, { 'a', 1 }, { 'z', 2 }, { 's', 3 }, { 'x', 4 }, { 'c', 5 },
+        { 'f', 6 }, { 'v', 7 }, { 'g', 8 }, { 'b', 9 }, { 'h', 10 }, { 'n', 11 },
+        { 'm', 12 }, { 'k', 13 }, { ',', 14 }, { 'l', 15 }, { '.', 16 }, { ';', 17 },
+
+        // Linha 2: q2w3er5t6y7ui9o0p´=  (C3 até F#4 - "q" = mesma nota que "m")
+        { 'q', 12 }, { '2', 13 }, { 'w', 14 }, { '3', 15 }, { 'e', 16 }, { 'r', 17 },
+        { '5', 18 }, { 't', 19 }, { '6', 20 }, { 'y', 21 }, { '7', 22 }, { 'u', 23 },
+        { 'i', 24 }, { '9', 25 }, { 'o', 26 }, { '0', 27 }, { 'p', 28 },
+        { 0x00B4, 29 }, { '=', 30 }
+    };
+    return table;
+}
+}
+
+namespace
+{
 class PluginListModel : public juce::ListBoxModel
 {
 public:
@@ -452,6 +479,12 @@ MainComponent::MainComponent()
     virtualKeyboard.setAvailableRange(36, 96); // C2 a C7 - faixa generosa pra maioria dos usos
     virtualKeyboard.setOctaveForMiddleC(4);
 
+    // Habilita o teclado do computador como controlador MIDI - ver
+    // keyStateChanged() logo abaixo, que escuta as teclas e injeta as notas
+    // no mesmo MidiKeyboardState do teclado desenhado na tela.
+    setWantsKeyboardFocus(true);
+    grabKeyboardFocus();
+
     addAndMakeVisible(audioSettingsButton);
     audioSettingsButton.onClick = [this] { showPreferences(); };
 
@@ -502,6 +535,43 @@ MainComponent::~MainComponent()
     preferencesWindow.reset();
 }
 
+bool MainComponent::keyStateChanged(bool /*isKeyDown*/)
+{
+    // Nota MIDI 36 = C2 (com setOctaveForMiddleC(4) já configurado no
+    // teclado virtual). Canal 1 e velocidade fixa, já que o teclado do
+    // computador não tem sensibilidade de toque.
+    constexpr int computerKeyboardBaseNote = 36;
+    constexpr int computerKeyboardChannel = 1;
+    constexpr float computerKeyboardVelocity = 0.85f;
+
+    auto& keyboardState = engine.getVirtualKeyboardState();
+
+    // keyStateChanged() é chamado sempre que QUALQUER tecla muda de estado,
+    // sem dizer qual - por isso precisamos varrer todas as teclas mapeadas
+    // e comparar com o que sabíamos estar pressionado no ciclo anterior,
+    // pra saber quais realmente mudaram (e disparar Note On/Off só nelas).
+    for (const auto& [character, offset] : getComputerKeyboardOffsets())
+    {
+        const bool isDown = juce::KeyPress::isKeyCurrentlyDown((int) character);
+        const bool wasDown = computerKeysCurrentlyDown.count(character) > 0;
+
+        if (isDown && !wasDown)
+        {
+            computerKeysCurrentlyDown.insert(character);
+            keyboardState.noteOn(computerKeyboardChannel, computerKeyboardBaseNote + offset,
+                                 computerKeyboardVelocity);
+        }
+        else if (!isDown && wasDown)
+        {
+            computerKeysCurrentlyDown.erase(character);
+            keyboardState.noteOff(computerKeyboardChannel, computerKeyboardBaseNote + offset, 0.0f);
+        }
+    }
+
+    return false; // não consome o evento - outros atalhos continuam funcionando normalmente
+}
+
+//==============================================================================
 void MainComponent::paint(juce::Graphics& g)
 {
     g.fillAll(getLookAndFeel().findColour(juce::ResizableWindow::backgroundColourId));
