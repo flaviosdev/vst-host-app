@@ -29,6 +29,97 @@ const std::vector<std::pair<juce::juce_wchar, int>>& getComputerKeyboardOffsets(
 
 namespace
 {
+/**
+    Barra de nível vertical estilo VU meter de DAW: sobe rápido em resposta
+    a picos, desce suave (efeito "ballistics" clássico de medidor). Não
+    conhece a Engine - só recebe o nível atual via setLevel() de fora,
+    chamado por um Timer no componente pai.
+*/
+class AudioLevelMeter : public juce::Component
+{
+public:
+    void setLevel(float newPeakLevel)
+    {
+        // Ballistics simples: sobe imediato pro pico novo se ele for maior;
+        // decai suavemente (multiplicador por frame) se o pico novo for menor.
+        // O decaimento é o que dá aquele efeito "cai devagarinho" de VU meter
+        // de verdade, em vez de um número pulando abruptamente pra baixo.
+        if (newPeakLevel > displayedLevel)
+            displayedLevel = newPeakLevel;
+        else
+            displayedLevel *= 0.85f;
+
+        repaint();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        auto bounds = getLocalBounds().toFloat();
+
+        g.setColour(findColour(juce::ResizableWindow::backgroundColourId).darker(0.15f));
+        g.fillRoundedRectangle(bounds, 3.0f);
+
+        const float clamped = juce::jlimit(0.0f, 1.5f, displayedLevel);
+        const float filledHeight = bounds.getHeight() * juce::jmin(1.0f, clamped);
+
+        auto filled = bounds.removeFromBottom(filledHeight);
+
+        // Verde na maior parte da faixa, amarelo perto do topo (~0dB),
+        // vermelho só na pontinha final (acima de 1.0 = clipping) -
+        // convenção visual padrão de medidor de DAW.
+        const auto colour = clamped > 1.0f ? juce::Colours::red
+                           : clamped > 0.8f ? juce::Colours::yellow
+                                             : juce::Colours::limegreen;
+
+        g.setColour(colour);
+        g.fillRoundedRectangle(filled, 3.0f);
+    }
+
+private:
+    float displayedLevel = 0.0f;
+};
+
+/**
+    Bolinha que pisca quando chega atividade MIDI num plugin, e apaga
+    sozinha depois de um tempo fixo curto. Também não conhece a Engine -
+    só recebe true/false via flash() e sabe apagar a própria animação.
+*/
+class MidiActivityIndicator : public juce::Component,
+                               private juce::Timer
+{
+public:
+    void flash()
+    {
+        litUntilMs = juce::Time::getMillisecondCounter() + flashDurationMs;
+        if (!isTimerRunning())
+            startTimer(30);
+        repaint();
+    }
+
+    void paint(juce::Graphics& g) override
+    {
+        const bool lit = juce::Time::getMillisecondCounter() < litUntilMs;
+        g.setColour(lit ? juce::Colours::orange
+                        : findColour(juce::ResizableWindow::backgroundColourId).darker(0.2f));
+        g.fillEllipse(getLocalBounds().toFloat().reduced(1.0f));
+    }
+
+private:
+    void timerCallback() override
+    {
+        repaint();
+
+        if (juce::Time::getMillisecondCounter() >= litUntilMs)
+            stopTimer();
+    }
+
+    static constexpr juce::uint32 flashDurationMs = 120;
+    juce::uint32 litUntilMs = 0;
+};
+}
+
+namespace
+{
 class PluginListModel : public juce::ListBoxModel
 {
 public:
@@ -67,7 +158,8 @@ private:
 // Uma linha representa um plugin que está realmente carregado.
 // Cada linha possui suas próprias ações, então abrir interface, trocar
 // programa ou mexer nos presets afeta somente aquele plugin.
-class MainComponent::PluginRowComponent : public juce::Component
+class MainComponent::PluginRowComponent : public juce::Component,
+                                           private juce::Timer
 {
 public:
     PluginRowComponent(PluginHostEngine& engineToUse,
@@ -91,6 +183,15 @@ public:
         nameLabel.setJustificationType(juce::Justification::centredTop);
         nameLabel.setFont(juce::Font(13.0f, juce::Font::bold));
         nameLabel.setMinimumHorizontalScale(1.0f); // não encolhe a fonte, deixa o texto quebrar de linha
+
+        addAndMakeVisible(midiActivityIndicator);
+
+        addAndMakeVisible(levelMeter);
+
+        // ~30x por segundo: rápido o bastante pra parecer fluido, sem
+        // sobrecarregar a UI. Lê os valores atômicos que a thread de áudio
+        // escreve em PluginHostEngine::processPlugins.
+        startTimerHz(30);
 
         addAndMakeVisible(editorButton);
         editorButton.onClick = [this] { openEditor(pluginId); };
@@ -365,7 +466,7 @@ public:
     // refreshLoadedPlugins) usa esse mesmo valor pra posicionar as colunas
     // lado a lado. Mudar aqui é a única coisa que precisa mudar pra ajustar
     // a largura de todas as colunas de uma vez.
-    static constexpr int columnWidth = 150; // 120 + espaço do slider de volume vertical
+    static constexpr int columnWidth = 168; // 150 + espaço do medidor de nível de áudio vertical
 
     int getPluginId() const noexcept { return pluginId; }
 
@@ -381,7 +482,13 @@ public:
         auto volumeColumn = area.removeFromRight(28);
         area.removeFromRight(4); // respiro entre os controles e o slider
 
-        nameLabel.setBounds(area.removeFromTop(36));
+        auto meterColumn = area.removeFromRight(14);
+        area.removeFromRight(4); // respiro entre o slider e o medidor
+
+        auto nameRow = area.removeFromTop(36);
+        midiActivityIndicator.setBounds(nameRow.removeFromRight(14).withSizeKeepingCentre(10, 10));
+        nameRow.removeFromRight(4);
+        nameLabel.setBounds(nameRow);
         area.removeFromTop(4);
 
         editorButton.setBounds(area.removeFromTop(26));
@@ -432,9 +539,26 @@ public:
                                (sceneToRemoveBottom - sceneTop) - volumeLearnHeight - 4);
         volumeLearnButton.setBounds(volumeColumn.getX(), sceneToRemoveBottom - volumeLearnHeight,
                                     volumeColumn.getWidth(), volumeLearnHeight);
+
+        // Medidor de nível: mesma faixa vertical do slider (topo do Cena até
+        // fundo do Remover) - você pediu "ao lado dos sliders de volume",
+        // então usa exatamente a altura que já é a de referência da coluna.
+        levelMeter.setBounds(meterColumn.getX(), sceneTop,
+                             meterColumn.getWidth(), sceneToRemoveBottom - sceneTop);
     }
 
 private:
+    // juce::Timer - chamado ~30x/segundo (ver startTimerHz no construtor).
+    // Só leitura: consulta os valores atômicos escritos pela thread de
+    // áudio e atualiza os dois indicadores visuais.
+    void timerCallback() override
+    {
+        levelMeter.setLevel(engine.getPeakLevel(pluginId));
+
+        if (engine.consumeMidiActivity(pluginId))
+            midiActivityIndicator.flash();
+    }
+
     PluginHostEngine& engine;
     const int pluginId;
 
@@ -449,6 +573,8 @@ private:
     juce::TextButton editorButton { "Abrir Interface" };
     juce::TextButton removeButton { "Remover" };
     juce::Slider volumeSlider;
+    AudioLevelMeter levelMeter;
+    MidiActivityIndicator midiActivityIndicator;
     juce::TextButton volumeLearnButton { "Learn" };
     juce::TextButton muteButton { "Mute" };
     juce::TextButton soloButton { "Solo" };

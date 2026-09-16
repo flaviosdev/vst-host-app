@@ -409,6 +409,30 @@ void PluginHostEngine::setPluginVolume(int pluginId, float volume)
 }
 
 //==============================================================================
+float PluginHostEngine::getPeakLevel(int pluginId) const
+{
+    // Só o ponteiro precisa do lock (protege a lista contra ser alterada
+    // por outra thread nesse instante); a leitura do valor em si é atômica
+    // e não precisa de lock nenhum - é por isso que fazemos isso ~30x por
+    // segundo sem risco de travar a UI esperando a thread de áudio.
+    const juce::ScopedLock lock(pluginListLock);
+    auto* loaded = findPlugin(pluginId);
+    return loaded != nullptr ? loaded->peakLevel.load(std::memory_order_relaxed) : 0.0f;
+}
+
+bool PluginHostEngine::consumeMidiActivity(int pluginId)
+{
+    const juce::ScopedLock lock(pluginListLock);
+    auto* loaded = findPlugin(pluginId);
+    if (loaded == nullptr)
+        return false;
+
+    // exchange: lê o valor atual E já escreve false no mesmo passo atômico -
+    // não existe uma janela entre "ler" e "zerar" onde um evento novo da
+    // thread de áudio poderia se perder sem ser notado.
+    return loaded->midiActivity.exchange(false, std::memory_order_relaxed);
+}
+
 bool PluginHostEngine::isPluginMuted(int pluginId) const
 {
     const juce::ScopedLock lock(pluginListLock);
@@ -713,8 +737,19 @@ void PluginHostEngine::processPlugins(juce::AudioBuffer<float>& buffer, juce::Mi
         MidiRouter::route(loaded.route, loaded.id, activeSceneId, activeSoloCount > 0,
                            midiMessages, buffer.getNumSamples(), loaded.scratchMidi);
 
+        // "Chegou MIDI de verdade pra esse plugin" é medido DEPOIS do
+        // MidiRouter, não antes - se o plugin estiver mutado, o roteador já
+        // filtrou tudo, então a bolinha de atividade corretamente não pisca.
+        if (!loaded.scratchMidi.isEmpty())
+            loaded.midiActivity.store(true, std::memory_order_relaxed);
+
         loaded.instance->processBlock(scratch, loaded.scratchMidi);
         scratch.applyGain(loaded.volume);
+
+        // Pico do bloco (não RMS): é o comportamento clássico de medidor
+        // de DAW - reage rápido a transientes, ao contrário de uma média.
+        loaded.peakLevel.store(scratch.getMagnitude(0, scratch.getNumSamples()),
+                               std::memory_order_relaxed);
 
         const int channelsToMix = juce::jmin(buffer.getNumChannels(), scratch.getNumChannels());
         for (int channel = 0; channel < channelsToMix; ++channel)

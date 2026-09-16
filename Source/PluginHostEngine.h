@@ -1,6 +1,7 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <atomic>
 #include <functional>
 #include <map>
 #include <vector>
@@ -90,6 +91,19 @@ public:
     float getPluginVolume(int pluginId) const;
     void setPluginVolume(int pluginId, float volume);
 
+    //== Medidor de áudio e atividade MIDI (para a UI) ==========================
+    // Nível de pico do último bloco processado, 0.0-1.0+ (não é dB, é
+    // amplitude linear - a UI decide como desenhar). Só leitura, não
+    // "consome" nada, porque um medidor de VU deve refletir o estado atual
+    // toda vez que é lido, não disparar uma vez e apagar.
+    float getPeakLevel(int pluginId) const;
+
+    // Diferente do de volume: "consome" o sinalizador (lê e já zera), porque
+    // é usado pra um flash momentâneo ("chegou uma nota agora") em vez de
+    // um estado contínuo. Se não for lido, o sinalizador acumula até a
+    // próxima leitura - não perde eventos rápidos entre uma leitura e outra.
+    bool consumeMidiActivity(int pluginId);
+
     //== Mute / Solo ===========================================================
     // "Pseudo-mute": não corta o áudio já em processamento, apenas deixa de
     // enviar MIDI pro plugin mutado (ver MidiRouter). Solo tem prioridade
@@ -166,6 +180,14 @@ private:
         int blockSize = 512;
         float volume = 1.0f;
         PluginMidiRoute route;
+
+        // Escritos pela thread de áudio a cada bloco (ver processPlugins),
+        // lidos pela UI via Timer (ver PluginHostEngine::consumeMeterState).
+        // std::atomic é seguro entre threads sem lock - importante aqui,
+        // porque a thread de áudio não pode esperar por um mutex sem
+        // arriscar um glitch sonoro.
+        std::atomic<float> peakLevel { 0.0f };
+        std::atomic<bool> midiActivity { false };
     };
 
     class ParallelPluginProcessor : public juce::AudioProcessor
