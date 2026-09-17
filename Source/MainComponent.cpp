@@ -251,33 +251,6 @@ public:
                 engine.startMidiLearn(MidiTriggerAction::toggleSolo, pluginId);
         };
 
-        addAndMakeVisible(sceneLearnButton);
-        sceneLearnButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::red);
-        sceneLearnButton.onClick = [this]
-        {
-            if (engine.isMidiLearnTarget(MidiTriggerAction::activateScene, pluginId))
-                engine.cancelMidiLearn();
-            else
-                engine.startMidiLearn(MidiTriggerAction::activateScene, pluginId);
-        };
-
-        addAndMakeVisible(sceneButton);
-        sceneButton.setClickingTogglesState(true);
-        sceneButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::cyan);
-        sceneButton.setToggleState(engine.getActiveScene() == pluginId, juce::dontSendNotification);
-        sceneButton.onClick = [this]
-        {
-            // Se o Learn global estiver aguardando um clique, este clique
-            // escolhe o controle - não troca de cena de verdade.
-            if (tryGlobalLearn(MidiTriggerAction::activateScene, pluginId))
-                return;
-
-            // Um toggle exclusivo: se este plugin já era a cena ativa,
-            // desliga (-1); senão, esta vira a cena ativa (troca a
-            // anterior, não acumula - diferente do solo).
-            engine.setActiveScene(engine.getActiveScene() == pluginId ? -1 : pluginId);
-        };
-
         addAndMakeVisible(removeButton);
         removeButton.onClick = [this] { removePlugin(pluginId); };
 
@@ -399,28 +372,20 @@ public:
         volumeSlider.setValue(engine.getPluginVolume(pluginId), juce::dontSendNotification);
 
         refreshRoute();
-        refreshScene();
         refreshMidiLearn();
     }
 
     // Só sincroniza os toggles de mute/solo (mais barato que refresh() inteiro).
     // Precisa ser chamado pra QUALQUER linha quando QUALQUER plugin muda de
     // solo, porque ligar o solo de um plugin muda o resultado sonoro de todos
-    // os outros (mesmo que o estado deles não tenha mudado).
+    // os outros (mesmo que o estado deles não tenha mudado). Também é
+    // chamado quando o modo Exclusive liga/desliga (ver
+    // MainComponent::exclusiveSoloChanged), pelo mesmo motivo.
     void refreshRoute()
     {
         muteButton.setToggleState(engine.isPluginMuted(pluginId), juce::dontSendNotification);
         soloButton.setToggleState(engine.isPluginSolo(pluginId), juce::dontSendNotification);
         volumeSlider.setValue(engine.getPluginVolume(pluginId), juce::dontSendNotification);
-    }
-
-    // Sincroniza só o botão de Cena. Separado de refreshRoute() porque cena
-    // ativa é um conceito à parte de mute/solo manual (ver PluginHostEngine),
-    // e precisa ser chamado em TODAS as linhas sempre que a cena mudar,
-    // já que ativar uma cena desliga visualmente todas as outras.
-    void refreshScene()
-    {
-        sceneButton.setToggleState(engine.getActiveScene() == pluginId, juce::dontSendNotification);
     }
 
     // Sincroniza os botões de Learn: mostra se ESTE plugin/ação específico
@@ -443,15 +408,12 @@ public:
 
         const bool muteIsTarget = engine.isMidiLearnTarget(MidiTriggerAction::toggleMute, pluginId);
         const bool soloIsTarget = engine.isMidiLearnTarget(MidiTriggerAction::toggleSolo, pluginId);
-        const bool sceneIsTarget = engine.isMidiLearnTarget(MidiTriggerAction::activateScene, pluginId);
 
         muteLearnButton.setToggleState(muteIsTarget, juce::dontSendNotification);
         soloLearnButton.setToggleState(soloIsTarget, juce::dontSendNotification);
-        sceneLearnButton.setToggleState(sceneIsTarget, juce::dontSendNotification);
 
         muteLearnButton.setButtonText(muteIsTarget ? "Aguardando..." : describe(MidiTriggerAction::toggleMute));
         soloLearnButton.setButtonText(soloIsTarget ? "Aguardando..." : describe(MidiTriggerAction::toggleSolo));
-        sceneLearnButton.setButtonText(sceneIsTarget ? "Aguardando..." : describe(MidiTriggerAction::activateScene));
 
         const bool volumeIsTarget = engine.isVolumeMidiLearnTarget(pluginId);
         volumeLearnButton.setToggleState(volumeIsTarget, juce::dontSendNotification);
@@ -502,14 +464,11 @@ public:
         soloButton.setBounds(area.removeFromTop(24));
         area.removeFromTop(2);
         soloLearnButton.setBounds(area.removeFromTop(20));
-        area.removeFromTop(6);
-
-        const int sceneTop = area.getY(); // topo do botão Cena - início da faixa do slider
-
-        sceneButton.setBounds(area.removeFromTop(24));
-        area.removeFromTop(2);
-        sceneLearnButton.setBounds(area.removeFromTop(20));
         area.removeFromTop(10);
+
+        // Marca o início da faixa vertical do slider de volume e do medidor
+        // de nível - vai até o fundo do botão Remover, calculado mais abaixo.
+        const int meterTop = area.getY();
 
         factoryLabel.setBounds(area.removeFromTop(16));
         factoryBox.setBounds(area.removeFromTop(24));
@@ -527,24 +486,20 @@ public:
 
         removeButton.setBounds(area.removeFromTop(24));
 
-        const int sceneToRemoveBottom = removeButton.getBottom(); // fundo do Remover - fim da faixa do slider
+        const int meterBottom = removeButton.getBottom();
 
         // Slider vertical ocupando a faixa toda, exceto os últimos 24px
-        // reservados pro botão Learn dele logo abaixo - a faixa total
-        // (topo do Cena até fundo do Remover) continua sendo a pedida;
-        // ela só é dividida entre o slider e o botão Learn dele.
+        // reservados pro botão Learn dele logo abaixo.
         const int volumeLearnHeight = 24;
-        volumeSlider.setBounds(volumeColumn.getX(), sceneTop,
+        volumeSlider.setBounds(volumeColumn.getX(), meterTop,
                                volumeColumn.getWidth(),
-                               (sceneToRemoveBottom - sceneTop) - volumeLearnHeight - 4);
-        volumeLearnButton.setBounds(volumeColumn.getX(), sceneToRemoveBottom - volumeLearnHeight,
+                               (meterBottom - meterTop) - volumeLearnHeight - 4);
+        volumeLearnButton.setBounds(volumeColumn.getX(), meterBottom - volumeLearnHeight,
                                     volumeColumn.getWidth(), volumeLearnHeight);
 
-        // Medidor de nível: mesma faixa vertical do slider (topo do Cena até
-        // fundo do Remover) - você pediu "ao lado dos sliders de volume",
-        // então usa exatamente a altura que já é a de referência da coluna.
-        levelMeter.setBounds(meterColumn.getX(), sceneTop,
-                             meterColumn.getWidth(), sceneToRemoveBottom - sceneTop);
+        // Medidor de nível: mesma faixa vertical do slider, ao lado dele.
+        levelMeter.setBounds(meterColumn.getX(), meterTop,
+                             meterColumn.getWidth(), meterBottom - meterTop);
     }
 
 private:
@@ -578,10 +533,8 @@ private:
     juce::TextButton volumeLearnButton { "Learn" };
     juce::TextButton muteButton { "Mute" };
     juce::TextButton soloButton { "Solo" };
-    juce::TextButton sceneButton { "Cena" };
     juce::TextButton muteLearnButton { "Learn" };
     juce::TextButton soloLearnButton { "Learn" };
-    juce::TextButton sceneLearnButton { "Learn" };
 
     juce::Label factoryLabel;
     juce::ComboBox factoryBox;
@@ -633,6 +586,15 @@ MainComponent::MainComponent()
         setStatus(globalLearnArmed
                        ? "MIDI Learn: clique em um botao Mute ou Solo, depois toque a tecla."
                        : "MIDI Learn cancelado.");
+    };
+
+    addAndMakeVisible(exclusiveButton);
+    exclusiveButton.setClickingTogglesState(true);
+    exclusiveButton.setColour(juce::TextButton::buttonOnColourId, juce::Colours::cyan);
+    exclusiveButton.setToggleState(engine.isExclusiveSoloEnabled(), juce::dontSendNotification);
+    exclusiveButton.onClick = [this]
+    {
+        engine.setExclusiveSoloEnabled(exclusiveButton.getToggleState());
     };
 
     addAndMakeVisible(loadedPluginsViewport);
@@ -717,6 +679,8 @@ void MainComponent::resized()
         auto row = area.removeFromTop(30);
         globalLearnButton.setBounds(row.removeFromRight(90));
         row.removeFromRight(6);
+        exclusiveButton.setBounds(row.removeFromRight(90));
+        row.removeFromRight(6);
         loadPluginButton.setBounds(row);
     }
     area.removeFromTop(12);
@@ -785,13 +749,15 @@ void MainComponent::pluginRouteChanged(int)
         row->refreshRoute();
 }
 
-void MainComponent::activeSceneChanged(int)
+void MainComponent::exclusiveSoloChanged()
 {
-    // Mesma lógica do pluginRouteChanged: ativar uma cena precisa desligar
-    // visualmente o botão de Cena de todas as OUTRAS linhas, não só ligar
-    // a que foi clicada.
+    // Ligar/desligar o modo Exclusive pode ter mudado qual plugin está em
+    // solo (ver PluginHostEngine::setExclusiveSoloEnabled) - sincroniza
+    // todas as linhas, mesmo motivo do pluginRouteChanged.
     for (auto& row : pluginRows)
-        row->refreshScene();
+        row->refreshRoute();
+
+    exclusiveButton.setToggleState(engine.isExclusiveSoloEnabled(), juce::dontSendNotification);
 }
 
 void MainComponent::midiLearnStateChanged()

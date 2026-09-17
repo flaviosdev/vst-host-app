@@ -27,7 +27,7 @@ private:
     void audioDeviceChanged() override;
     void pluginsChanged() override;
     void pluginRouteChanged(int pluginId) override;
-    void activeSceneChanged(int pluginId) override;
+    void exclusiveSoloChanged() override;
     void midiLearnStateChanged() override;
 
     //== UI ====================================================================
@@ -73,6 +73,7 @@ private:
     std::unique_ptr<juce::ListBoxModel> pluginListModel;
     juce::TextButton loadPluginButton { "Carregar Plugin Selecionado" };
     juce::TextButton globalLearnButton { "Learn" };
+    juce::TextButton exclusiveButton { "Exclusive" };
     juce::Label statusLabel;
     juce::Viewport loadedPluginsViewport;
     juce::Component loadedPluginsContainer;

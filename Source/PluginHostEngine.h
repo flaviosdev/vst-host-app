@@ -32,10 +32,11 @@ public:
         // daquele plugin, sem re-renderizar a linha inteira.
         virtual void pluginRouteChanged(int /*pluginId*/) {}
 
-        // Chamado quando a cena ativa muda (inclusive quando é desativada,
-        // com pluginId = -1). Diferente de pluginRouteChanged: afeta a
-        // aparência de TODAS as linhas de uma vez, não só uma.
-        virtual void activeSceneChanged(int /*pluginId*/) {}
+        // Chamado quando o modo Exclusive liga/desliga, ou quando ativá-lo
+        // já dispara a troca de solo internamente. Afeta a aparência de
+        // TODAS as linhas de uma vez (o botão Solo delas passa a se
+        // comportar diferente), não só uma - por isso não leva pluginId.
+        virtual void exclusiveSoloChanged() {}
 
         // Chamado quando o modo de captura do MIDI Learn liga/desliga, ou
         // quando um binding é aprendido/removido - a UI usa isso pra
@@ -114,15 +115,15 @@ public:
     bool isPluginSolo(int pluginId) const;
     void setPluginSolo(int pluginId, bool shouldBeSolo);
 
-    //== Cena ativa =============================================================
-    // Modo de troca exclusiva pra uso ao vivo: quando uma cena está ativa,
-    // SÓ o plugin dela recebe MIDI (Note On) - todos os outros ficam mudos,
-    // ignorando o estado de mute/solo manual deles. Ativar outra cena troca
-    // na hora, sem acumular (ao contrário do solo, que é aditivo).
-    // -1 = nenhuma cena ativa (mute/solo manuais voltam a mandar).
-    void setActiveScene(int pluginId);
-    int getActiveScene() const noexcept { return activeSceneId; }
-    bool isSceneModeActive() const noexcept { return activeSceneId != -1; }
+    //== Modo Exclusive =========================================================
+    // Muda o comportamento do Solo (não é um conceito à parte): com o modo
+    // ligado, ativar o solo de um plugin desativa automaticamente o solo de
+    // qualquer outro que estivesse ligado - só um por vez. O botão de cada
+    // plugin fica idempotente enquanto o solo dele já está ligado (clicar de
+    // novo não faz nada; só clicar em OUTRO solo troca). Desligar o modo
+    // Exclusive mantém o último solo que estava ativo (não desliga nada).
+    void setExclusiveSoloEnabled(bool shouldBeEnabled);
+    bool isExclusiveSoloEnabled() const noexcept { return exclusiveSoloEnabled; }
 
     //== MIDI Learn =============================================================
     // Liga o modo de captura: a próxima nota (Note On) recebida de QUALQUER
@@ -260,7 +261,7 @@ private:
     juce::CriticalSection pluginListLock;
     int nextPluginId = 1;
     int activeSoloCount = 0; // protegido por pluginListLock, igual a loadedPlugins
-    int activeSceneId = -1;  // protegido por pluginListLock; -1 = nenhuma cena ativa
+    bool exclusiveSoloEnabled = false; // protegido por pluginListLock, igual ao resto do estado de roteamento
 
     juce::ListenerList<Listener> listeners;
     MidiActionMap midiActionMap; // protegido por pluginListLock, igual ao resto do estado de roteamento

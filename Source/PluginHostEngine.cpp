@@ -325,7 +325,6 @@ juce::String PluginHostEngine::getPluginName(int pluginId) const
 
 void PluginHostEngine::unloadPlugin(int pluginId)
 {
-    bool sceneWasCleared = false;
     bool pluginHadBindings = false;
 
     {
@@ -338,12 +337,6 @@ void PluginHostEngine::unloadPlugin(int pluginId)
         if ((*it)->route.solo)
             --activeSoloCount;
 
-        if (activeSceneId == pluginId)
-        {
-            activeSceneId = -1;
-            sceneWasCleared = true;
-        }
-
         (*it)->instance->releaseResources();
         loadedPlugins.erase(it);
 
@@ -354,12 +347,6 @@ void PluginHostEngine::unloadPlugin(int pluginId)
     }
 
     listeners.call([](Listener& l) { l.pluginChanged(); });
-
-    // Notificado fora do escopo acima e depois de pluginChanged(): a cena
-    // sendo desativada é um evento à parte, e a UI precisa da lista de
-    // plugins já atualizada (sem o que foi removido) pra reagir direito.
-    if (sceneWasCleared)
-        listeners.call([](Listener& l) { l.activeSceneChanged(-1); });
 
     if (pluginHadBindings)
         listeners.call([](Listener& l) { l.midiLearnStateChanged(); });
@@ -373,13 +360,11 @@ void PluginHostEngine::unloadPlugins()
             loaded->instance->releaseResources();
         loadedPlugins.clear();
         activeSoloCount = 0;
-        activeSceneId = -1;
         midiActionMap.clearAll();
         midiCcMap.clearAll();
     }
 
     listeners.call([](Listener& l) { l.pluginChanged(); });
-    listeners.call([](Listener& l) { l.activeSceneChanged(-1); });
     listeners.call([](Listener& l) { l.midiLearnStateChanged(); });
 }
 
@@ -463,37 +448,91 @@ bool PluginHostEngine::isPluginSolo(int pluginId) const
 
 void PluginHostEngine::setPluginSolo(int pluginId, bool shouldBeSolo)
 {
+    juce::Array<int> pluginsToNotify;
+
     {
         const juce::ScopedLock lock(pluginListLock);
         auto* loaded = findPlugin(pluginId);
-        if (loaded == nullptr || loaded->route.solo == shouldBeSolo)
+        if (loaded == nullptr)
             return;
 
-        loaded->route.solo = shouldBeSolo;
-        activeSoloCount += shouldBeSolo ? 1 : -1;
-        jassert(activeSoloCount >= 0);
+        if (exclusiveSoloEnabled)
+        {
+            // Idempotente: se este plugin JÁ é o único em solo, o clique
+            // não faz nada - nem liga, nem desliga (é assim que você pediu:
+            // "aperto de novo, nada acontece"). Desligar um solo enquanto
+            // Exclusive está ligado também não faz nada por esse mesmo
+            // motivo - a única forma de trocar é ativando OUTRO plugin.
+            if (!shouldBeSolo || loaded->route.solo)
+                return;
+
+            // Desliga qualquer outro solo ativo antes de ligar este -
+            // nunca mais de um por vez enquanto o modo estiver ligado.
+            for (auto& other : loadedPlugins)
+            {
+                if (other->route.solo && other->id != pluginId)
+                {
+                    other->route.solo = false;
+                    --activeSoloCount;
+                    pluginsToNotify.add(other->id);
+                }
+            }
+
+            loaded->route.solo = true;
+            ++activeSoloCount;
+            pluginsToNotify.add(pluginId);
+        }
+        else
+        {
+            if (loaded->route.solo == shouldBeSolo)
+                return;
+
+            loaded->route.solo = shouldBeSolo;
+            activeSoloCount += shouldBeSolo ? 1 : -1;
+            jassert(activeSoloCount >= 0);
+            pluginsToNotify.add(pluginId);
+        }
     }
 
-    listeners.call([pluginId](Listener& l) { l.pluginRouteChanged(pluginId); });
+    for (const auto notifyId : pluginsToNotify)
+        listeners.call([notifyId](Listener& l) { l.pluginRouteChanged(notifyId); });
 }
 
-void PluginHostEngine::setActiveScene(int pluginId)
+void PluginHostEngine::setExclusiveSoloEnabled(bool shouldBeEnabled)
 {
     {
         const juce::ScopedLock lock(pluginListLock);
-
-        // -1 sempre é uma "cena" válida (significa "desativar"). Qualquer
-        // outro valor precisa apontar pra um plugin que exista de verdade.
-        if (pluginId != -1 && findPlugin(pluginId) == nullptr)
+        if (exclusiveSoloEnabled == shouldBeEnabled)
             return;
 
-        if (activeSceneId == pluginId)
-            return;
+        exclusiveSoloEnabled = shouldBeEnabled;
 
-        activeSceneId = pluginId;
+        // Ligar o modo com mais de um solo já ativo (deixado de antes,
+        // quando o modo estava desligado) reduz pro primeiro que encontrar -
+        // não dá pra saber qual o usuário "quis" manter, então essa escolha
+        // é arbitrária, mas necessária pra já entrar no modo com no máximo
+        // um solo ativo, como o modo promete.
+        if (shouldBeEnabled)
+        {
+            bool foundFirst = false;
+            for (auto& loaded : loadedPlugins)
+            {
+                if (!loaded->route.solo)
+                    continue;
+
+                if (!foundFirst)
+                {
+                    foundFirst = true;
+                    continue;
+                }
+
+                loaded->route.solo = false;
+                --activeSoloCount;
+            }
+        }
     }
 
-    listeners.call([pluginId](Listener& l) { l.activeSceneChanged(pluginId); });
+    listeners.call([](Listener& l) { l.exclusiveSoloChanged(); });
 }
 
 //==============================================================================
@@ -696,14 +735,6 @@ void PluginHostEngine::interceptLearnableNotes(juce::MidiBuffer& midiMessages)
                             case MidiTriggerAction::toggleSolo:
                                 setPluginSolo(pluginId, !isPluginSolo(pluginId));
                                 break;
-
-                            case MidiTriggerAction::activateScene:
-                                // Sempre dispara - nunca "toggle" no sentido de
-                                // mute/solo. Apertar de novo o mesmo pad desliga
-                                // a cena (mesmo gesto do clique do mouse); apertar
-                                // outro pad de cena troca.
-                                setActiveScene(getActiveScene() == pluginId ? -1 : pluginId);
-                                break;
                         }
                     });
                 }
@@ -731,10 +762,10 @@ void PluginHostEngine::processPlugins(juce::AudioBuffer<float>& buffer, juce::Mi
         auto& scratch = loaded.scratchBuffer;
         scratch.clear();
 
-        // Cada plugin recebe o MIDI já filtrado pelo estado de mute/solo/cena
+        // Cada plugin recebe o MIDI já filtrado pelo estado de mute/solo
         // dele (e, no futuro, por canal). Ver MidiRouter::route().
         loaded.scratchMidi.clear();
-        MidiRouter::route(loaded.route, loaded.id, activeSceneId, activeSoloCount > 0,
+        MidiRouter::route(loaded.route, activeSoloCount > 0,
                            midiMessages, buffer.getNumSamples(), loaded.scratchMidi);
 
         // "Chegou MIDI de verdade pra esse plugin" é medido DEPOIS do

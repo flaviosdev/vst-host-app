@@ -6,8 +6,7 @@
 enum class MidiTriggerAction
 {
     toggleMute,
-    toggleSolo,
-    activateScene
+    toggleSolo
 };
 
 struct MidiTriggerBinding
